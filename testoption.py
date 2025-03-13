@@ -295,7 +295,7 @@ def compute_average_delta(df_calls, df_puts, S):
     df_merged["delta_diff"] = df_merged["call_delta_avg"] - df_merged["put_delta_avg"]
     return df_merged
 
-def rolling_percentile_zones(df, column="delta_diff", window="1D", lower_percentile=30, upper_percentile=70):
+def rolling_percentile_zones(df, column="delta_diff", window="1D", lower_percentile=33, upper_percentile=66):
     df = df.set_index("date_time").sort_index()
     def percentile_in_window(x, q):
         return np.percentile(x, q)
