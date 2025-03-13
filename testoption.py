@@ -741,7 +741,7 @@ def main():
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
     
-    rv_overall = calculate_parkinson_volatility_fixed(df_kraken, period=parkinson_period, annualize_days=365)
+    rv_overall = calculate_parkinson_volatility(df_kraken, window_days=30, annualize_days=365)
     df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_overall)
     if df_ev is not None and not df_ev.empty:
         best_candidate = df_ev.loc[df_ev["EV"].idxmax()]
