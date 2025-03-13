@@ -535,7 +535,7 @@ def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv):
     """
     For options within ±2% of the spot, group by strike and average the IV.
     Then compute EV for an ATM straddle using:
-        EV = S * (RV - avg IV) * sqrt(2T/π)
+        EV = S * (RV - avg_IV) * sqrt(2T/π)
     Returns a DataFrame with candidate strikes, average IV, and EV.
     """
     tolerance = 0.02 * spot_price
@@ -719,7 +719,7 @@ def main():
     )
     df_iv_agg_reset = df_iv_agg.reset_index()
 
-    # Build ticker_list for open interest, delta and record IV using T_YEARS for proper delta calculation
+    # Build ticker_list for open interest, delta, and record IV using T_YEARS for proper delta calculation
     global ticker_list
     ticker_list = []
     for instrument in all_instruments:
@@ -782,12 +782,11 @@ def main():
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
     
-    # For any recommendation that involves buying straddles, compute EV for candidate ATM strikes.
-    # (Here, we use the overall realized volatility from Kraken as RV.)
+    # For recommendations involving straddles, calculate the EV for ATM straddles.
     rv_overall = calculate_realized_volatility(df_kraken)
     df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_overall)
     if df_ev is not None and not df_ev.empty:
-        # Choose the candidate with the highest EV
+        # Choose the candidate with the highest EV.
         best_candidate = df_ev.loc[df_ev["EV"].idxmax()]
         best_strike = best_candidate["Strike"]
         st.subheader("ATM Straddle EV Analysis")
@@ -821,9 +820,12 @@ def main():
             continue
         option_type = instrument.split("-")[-1]
         if option_type == "C":
-            row = df_calls[df_calls["instrument_name"] == instrument].iloc[0]
+            candidate = df_calls[df_calls["instrument_name"] == instrument]
         else:
-            row = df_puts[df_puts["instrument_name"] == instrument].iloc[0]
+            candidate = df_puts[df_puts["instrument_name"] == instrument]
+        if candidate.empty:
+            continue
+        row = candidate.iloc[0]
         gex = compute_gex(row, spot_price, oi)
         gex_data.append({"strike": strike, "gex": gex, "option_type": option_type})
     df_gex = pd.DataFrame(gex_data)
