@@ -674,8 +674,8 @@ def main():
     st.write(f"Average Call Delta: {trade_decision['avg_call_delta']:.4f}")
     st.write(f"Average Put Delta: {trade_decision['avg_put_delta']:.4f}")
     # Display gamma values with higher precision
-    st.write(f"Average Call Gamma: {trade_decision['avg_call_gamma']:.6f}")
-    st.write(f"Average Put Gamma: {trade_decision['avg_put_gamma']:.6f}")
+    st.write(f"Average Gamma: {trade_decision['avg_call_gamma']:.6f}")
+   
     
     st.write("### Trading Recommendation")
     st.write(f"**Recommendation:** {trade_decision['recommendation']}")
