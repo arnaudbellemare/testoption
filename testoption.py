@@ -460,7 +460,6 @@ def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv):
         EV = S * (RV - avg_IV) * sqrt(2T/π)
     Returns a DataFrame with candidate strikes, average IV, and EV.
     """
-    # Adjust tolerance based on RV and T (can be tuned)
     tolerance = spot_price * 0.02  
     atm_candidates = [item for item in ticker_list if abs(item["strike"] - spot_price) <= tolerance]
     if not atm_candidates:
@@ -485,9 +484,11 @@ def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv):
 # TRADE STRATEGY EVALUATION (USING PERCENTILES)
 ###########################################
 def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None,
-                            historical_vols=None, historical_vrps=None):
-    # If historical_vols is empty, you might fetch a longer history (omitted here for brevity)
+                            historical_vols=None, historical_vrps=None, days_to_expiration=7):
+    # Compute RV based on 7 days of data, then scale if expiration > 7 days
     rv = calculate_realized_volatility(df_kraken)
+    if days_to_expiration > 7:
+        rv = rv * np.sqrt(days_to_expiration / 7)
     iv = df["iv_close"].mean() if not df.empty else np.nan
 
     # Add threshold check for IV/RV divergence (>20% difference)
@@ -584,8 +585,8 @@ def main():
         st.error("Expiration date is invalid or already passed")
         st.stop()
     expiry_str = expiry_date.strftime("%d%b%y").upper()
-    days_to_expiry = (expiry_date - current_date).days
-    T_YEARS = days_to_expiry / 365
+    days_to_expiration = (expiry_date - current_date).days
+    T_YEARS = days_to_expiration / 365
     st.sidebar.markdown(f"**Using Expiration Date:** {expiry_str}")
     
     deviation_option = st.sidebar.select_slider(
@@ -678,7 +679,8 @@ def main():
     )
     trade_decision = evaluate_trade_strategy(df, spot_price, risk_tolerance, df_iv_agg_reset,
                                                historical_vols=daily_rv,
-                                               historical_vrps=historical_vrps)
+                                               historical_vrps=historical_vrps,
+                                               days_to_expiration=days_to_expiration)
     
     st.write("### Market and Volatility Metrics")
     st.write(f"Implied Volatility (IV): {trade_decision['iv']:.2%}")
