@@ -602,7 +602,10 @@ def main():
     df_iv_agg = df_iv_agg.resample("5T").mean().ffill()
 
 # Now compute the rolling mean on the datetime-indexed DataFrame
-    df_iv_agg["rolling_mean"] = df_iv_agg["iv_mean"].rolling("1D", min_periods=1).mean()
+# Instead of resetting the index, use date_time as the index:
+    df_iv_agg = df_iv_agg.sort_index()  # ensure it's sorted by date_time
+    df_iv_agg["rolling_mean"] = df_iv_agg["iv_mean"].rolling("1D").mean()
+
     df_iv_agg["market_regime"] = np.where(
         df_iv_agg["iv_mean"] > df_iv_agg["rolling_mean"], "Risk-Off", "Risk-On"
     )
@@ -611,7 +614,9 @@ def main():
     df_iv_agg_reset = df_iv_agg.reset_index()
 
     # Create a simple market regime column for decision-making:
-    df_iv_agg_reset["rolling_mean"] = df_iv_agg_reset["iv_mean"].rolling("1D", min_periods=1).mean()
+    df_iv_agg_reset = df_iv_agg.reset_index()  # date_time becomes a column now
+    df_iv_agg_reset["rolling_mean"] = df_iv_agg_reset.rolling("1D", on="date_time")["iv_mean"].mean()
+
     df_iv_agg_reset["market_regime"] = np.where(df_iv_agg_reset["iv_mean"] > df_iv_agg_reset["rolling_mean"], "Risk-Off", "Risk-On")
     
     # Build ticker_list for open interest and delta analysis
