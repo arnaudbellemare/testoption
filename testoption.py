@@ -57,26 +57,49 @@ COLUMNS = [
 ]
 
 ###########################################
-# EXPIRATION DATE HELPER FUNCTIONS
+# EXPIRATION DATE HELPER FUNCTIONS (UPDATED)
 ###########################################
-def get_valid_expiration_options(current_date):
-    """
-    Returns a list of valid expiration dates using only 14 and 28 days from now.
-    """
-    options = []
-    for days in [14, 28]:
-        exp_date = current_date + dt.timedelta(days=days)
-        options.append(exp_date.strftime("%d%b%y").upper())
-    return options
+def get_valid_expiration_options(current_date=None):
+    """Return the valid expiration day options based on today's date."""
+    if current_date is None:
+        current_date = dt.datetime.now()
+    # Before the 14th, both options (14 and 28) are available.
+    if current_date.day < 14:
+        return [14, 28]
+    # Between 14 (inclusive) and 28, only the 28th is available.
+    elif current_date.day < 28:
+        return [28]
+    # On or after the 28th, both dates have passed for the current month,
+    # so offer both options (which will be for the next month).
+    else:
+        return [14, 28]
 
-def compute_expiry_date(selected_day, current_date):
+def compute_expiry_date(selected_day, current_date=None):
     """
-    Converts a selected expiration day string into a datetime object.
+    Compute the expiration date based on the selected day.
+    
+    - If today is before the chosen day, use the current month.
+    - Otherwise, roll over to the next month.
     """
-    try:
-        return dt.datetime.strptime(selected_day, "%d%b%y")
-    except Exception:
-        return None
+    if current_date is None:
+        current_date = dt.datetime.now()
+    # If current day is less than the selected day, expiration is in current month.
+    if current_date.day < selected_day:
+        try:
+            expiry = current_date.replace(day=selected_day, hour=0, minute=0, second=0, microsecond=0)
+        except ValueError:
+            st.error("Invalid expiration date for current month.")
+            return None
+    else:
+        # Roll over to next month (handle December rollover)
+        year = current_date.year + (current_date.month // 12)
+        month = (current_date.month % 12) + 1
+        try:
+            expiry = dt.datetime(year, month, selected_day)
+        except ValueError:
+            st.error("Invalid expiration date for next month.")
+            return None
+    return expiry
 
 ###########################################
 # CREDENTIALS & LOGIN FUNCTIONS (from text files)
@@ -630,8 +653,9 @@ def main():
     
     # EXPIRATION DATE SELECTION
     current_date = dt.datetime.now()
-    valid_options = get_valid_expiration_options(current_date)
-    selected_day = st.sidebar.selectbox("Choose Expiration Day", options=valid_options)
+    valid_days = get_valid_expiration_options(current_date)
+    # Display valid expiration days (e.g., [14] or [14, 28])
+    selected_day = st.sidebar.selectbox("Choose Expiration Day", options=valid_days)
     expiry_date = compute_expiry_date(selected_day, current_date)
     if expiry_date is None or expiry_date < current_date:
         st.error("Expiration date is invalid or already passed")
