@@ -734,9 +734,10 @@ def main():
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
     
-    # Use Parkinson volatility for overall realized volatility
-    rv_overall = calculate_parkinson_volatility(df_kraken, window_days=7, annualize_days=365)
-    df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_overall)
+    # For EV calculation, extract the latest realized volatility value (scalar) for current expiration
+    rv_series = calculate_parkinson_volatility(df_kraken, window_days=7, annualize_days=365)
+    rv_scalar = rv_series.iloc[-1] if not rv_series.empty else np.nan
+    df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_scalar)
     if df_ev is not None and not df_ev.empty and not df_ev["EV"].isna().all():
         df_ev_clean = df_ev.dropna(subset=["EV"])
         if not df_ev_clean.empty:
