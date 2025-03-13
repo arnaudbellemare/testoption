@@ -678,7 +678,7 @@ def main():
     )
     df_iv_agg["date_time"] = pd.to_datetime(df_iv_agg["date_time"])
     df_iv_agg = df_iv_agg.set_index("date_time")
-    df_iv_agg = df_iv_agg.resample("5T").mean().ffill()
+    df_iv_agg = df_iv_agg.resample("5min").mean().ffill()
     df_iv_agg = df_iv_agg.sort_index()
     df_iv_agg["rolling_mean"] = df_iv_agg["iv_mean"].rolling("1D").mean()
     df_iv_agg["market_regime"] = np.where(
@@ -747,8 +747,8 @@ def main():
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
     
-    # Use the same 7-day window for overall realized volatility (for EV calculation)
-    rv_overall = calculate_roger_satchell_volatility(df_kraken, window_days=7, annualize_days=365)
+    # Replace the call to calculate_roger_satchell_volatility with calculate_parkinson_volatility for overall volatility
+    rv_overall = calculate_parkinson_volatility(df_kraken, window_days=7, annualize_days=365)
     df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_overall)
     if df_ev is not None and not df_ev.empty and not df_ev["EV"].isna().all():
         df_ev_clean = df_ev.dropna(subset=["EV"])
