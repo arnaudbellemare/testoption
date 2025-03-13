@@ -623,10 +623,13 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
 def main():
     login()  # Ensure user is logged in
     st.title("Crypto Options Visualization Dashboard (Plotly Version) with Volatility Trading Decisions")
+    
+    # Logout button
     if st.button("Logout"):
         st.session_state.logged_in = False
         st.stop()
     
+    # Set expiration date and other sidebar options
     current_date = dt.datetime.now()
     valid_days = get_valid_expiration_options(current_date)
     selected_day = st.sidebar.selectbox("Choose Expiration Day", options=valid_days)
@@ -646,6 +649,7 @@ def main():
     )
     multiplier = 1 if "1 Standard" in deviation_option else 2
 
+    # Fetch Kraken data (dual timeframe: 5m for real-time and 1d for volatility)
     global df_kraken
     df_kraken = fetch_kraken_data()
     if df_kraken.empty:
@@ -654,6 +658,7 @@ def main():
     spot_price = df_kraken["close"].iloc[-1]
     st.write(f"Current BTC/USD Price: {spot_price:.2f}")
     
+    # Fetch and filter instruments
     try:
         filtered_calls, filtered_puts = get_filtered_instruments(spot_price, expiry_str, T_YEARS, multiplier)
     except Exception as e:
@@ -662,7 +667,8 @@ def main():
     st.write("Filtered Call Instruments:", filtered_calls)
     st.write("Filtered Put Instruments:", filtered_puts)
     all_instruments = filtered_calls + filtered_puts
-    
+
+    # Fetch options data from Thalex API
     df = fetch_data(tuple(all_instruments))
     if df.empty:
         st.error("No data fetched from Thalex. Please check the API or instrument names.")
@@ -671,6 +677,7 @@ def main():
     df_calls = df[df["option_type"] == "C"].copy().sort_values("date_time")
     df_puts = df[df["option_type"] == "P"].copy().sort_values("date_time")
     
+    # Aggregate IV data for display
     df_iv_agg = (
         df.groupby("date_time", as_index=False)["iv_close"]
         .mean()
@@ -678,21 +685,19 @@ def main():
     )
     df_iv_agg["date_time"] = pd.to_datetime(df_iv_agg["date_time"])
     df_iv_agg = df_iv_agg.set_index("date_time")
-    df_iv_agg = df_iv_agg.resample("5min").mean().ffill()
-    df_iv_agg = df_iv_agg.sort_index()
+    df_iv_agg = df_iv_agg.resample("5T").mean().ffill().sort_index()
     df_iv_agg["rolling_mean"] = df_iv_agg["iv_mean"].rolling("1D").mean()
     df_iv_agg["market_regime"] = np.where(
         df_iv_agg["iv_mean"] > df_iv_agg["rolling_mean"], "Risk-Off", "Risk-On"
     )
     df_iv_agg_reset = df_iv_agg.reset_index()
 
+    # Build ticker list for further analysis
     global ticker_list
     ticker_list = []
     for instrument in all_instruments:
         ticker_data = fetch_ticker(instrument)
-        if ticker_data and "open_interest" in ticker_data:
-            oi = ticker_data["open_interest"]
-        else:
+        if not (ticker_data and "open_interest" in ticker_data):
             continue
         try:
             strike = int(instrument.split("-")[2])
@@ -712,15 +717,17 @@ def main():
             "instrument": instrument,
             "strike": strike,
             "option_type": option_type,
-            "open_interest": oi,
+            "open_interest": ticker_data["open_interest"],
             "delta": delta_est,
             "iv": iv_val
         })
     
+    # Compute historical realized volatility and IV metrics
     daily_rv = compute_daily_realized_volatility(df_kraken)
     daily_iv = compute_daily_average_iv(df_iv_agg)
     historical_vrps = compute_historical_vrp(daily_iv, daily_rv)
     
+    # Evaluate trade strategy using our defined function
     st.subheader("Volatility Trading Decision Tool")
     risk_tolerance = st.sidebar.selectbox(
         "Risk Tolerance",
@@ -747,9 +754,10 @@ def main():
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
     
-    # Replace the call to calculate_roger_satchell_volatility with calculate_parkinson_volatility for overall volatility
-    rv_overall = calculate_parkinson_volatility(df_kraken, window_days=7, annualize_days=365)
-    df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_overall)
+    # For EV calculations, use a single scalar realized volatility
+    rv_series = calculate_roger_satchell_volatility(df_kraken, window_days=7, annualize_days=365)
+    rv_scalar = rv_series.iloc[-1] if not pd.isna(rv_series).any() and not rv_series.empty else np.nan
+    df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_scalar)
     if df_ev is not None and not df_ev.empty and not df_ev["EV"].isna().all():
         df_ev_clean = df_ev.dropna(subset=["EV"])
         if not df_ev_clean.empty:
@@ -757,18 +765,20 @@ def main():
             best_strike = best_candidate["Strike"]
             st.subheader("ATM Straddle EV Analysis")
             st.write("Candidate Strikes and their Expected Value (EV) in $:")
-            st.dataframe(df_ev_clean)
+            st.dataframe(df_ev_clean.style.format({"Avg IV": "{:.2%}", "EV": "{:.2f}"}))
             st.write(f"Recommended ATM Strike based on highest EV: {best_strike}")
         else:
             st.write("No ATM candidates found with valid EV values.")
     else:
         st.write("No ATM candidates found within tolerance for EV calculation.")
     
+    # Simulate trade button
     if st.button("Simulate Trade"):
         st.write("Simulating trade based on recommendation...")
         st.write("Position Size: Adjust based on capital (e.g., 1-5% of portfolio for chosen risk tolerance)")
         st.write("Monitor price and volatility in real-time and adjust hedges dynamically.")
     
+    # Volatility Smile Visualization
     if not df_calls.empty and not df_puts.empty:
         df_calls["gamma"] = df_calls.apply(lambda row: compute_gamma(row, spot_price), axis=1)
         df_puts["gamma"] = df_puts.apply(lambda row: compute_gamma(row, spot_price), axis=1)
@@ -802,12 +812,11 @@ def main():
         st.plotly_chart(fig_vol_smile, use_container_width=True)
         plot_gamma_heatmap(pd.concat([df_calls, df_puts]))
     
+    # Gamma Exposure (GEX) Visualization
     gex_data = []
     for instrument in all_instruments:
         ticker_data = fetch_ticker(instrument)
-        if ticker_data and "open_interest" in ticker_data:
-            oi = ticker_data["open_interest"]
-        else:
+        if not (ticker_data and "open_interest" in ticker_data):
             continue
         try:
             strike = int(instrument.split("-")[2])
@@ -821,7 +830,7 @@ def main():
         if candidate.empty:
             continue
         row = candidate.iloc[0]
-        gex = compute_gex(row, spot_price, oi)
+        gex = compute_gex(row, spot_price, ticker_data["open_interest"])
         gex_data.append({"strike": strike, "gex": gex, "option_type": option_type})
     df_gex = pd.DataFrame(gex_data)
     if not df_gex.empty:
