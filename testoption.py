@@ -243,39 +243,20 @@ def fetch_kraken_data():
 ###########################################
 # COMPUTE ROLLING VRP FUNCTION (using Roger-Satchell)
 ###########################################
-def compute_rolling_vrp(group, window_str):
-    # Convert window string to number of days (e.g., '7D' -> 7)
-    window_days = int(window_str[:-1])
+def compute_vrp(iv_series, realized_volatility_series):
+    """
+    Compute Volatility Risk Premium (VRP) as IV² - RV².
     
-    # Resample to daily OHLC data and average IV
-    df = group.set_index('date_time').copy()
-    daily_df = df.resample('D').agg({
-        'mark_price_open': 'first',
-        'mark_price_high': 'max',
-        'mark_price_low': 'min',
-        'mark_price_close': 'last',
-        'iv_close': 'mean'
-    }).dropna()
-    
-    # Calculate daily Roger Satchell variance components
-    daily_df['rs_variance'] = (
-        np.log(daily_df['mark_price_high'] / daily_df['mark_price_open']) *
-        np.log(daily_df['mark_price_high'] / daily_df['mark_price_close']) +
-        np.log(daily_df['mark_price_low'] / daily_df['mark_price_open']) *
-        np.log(daily_df['mark_price_low'] / daily_df['mark_price_close'])
-    )
-    
-    # Calculate rolling sum of RS variance over the window
-    rolling_rv = daily_df['rs_variance'].rolling(window=window_days, min_periods=1).sum()
-    # Annualize the realized variance
-    rolling_rv_annual = rolling_rv * (365 / window_days)
-    
-    # Calculate rolling average of squared IV (implied variance)
-    rolling_iv = (daily_df['iv_close'] ** 2).rolling(window=window_days, min_periods=1).mean()
-    
-    # Compute VRP and forward-fill to match original timestamps
-    vrp = (rolling_iv - rolling_rv_annual).reindex(df.index, method='ffill')
-    
+    Args:
+        iv_series (pd.Series): Implied volatility series.
+        realized_volatility_series (pd.Series): Realized volatility series.
+        
+    Returns:
+        pd.Series: VRP values.
+    """
+    iv_squared = iv_series ** 2
+    rv_squared = realized_volatility_series ** 2
+    vrp = iv_squared - rv_squared
     return vrp
 
 ###########################################
@@ -449,14 +430,33 @@ def classify_vrp_regime(current_vrp, historical_vrps):
 ###########################################
 # HISTORICAL DATA UTILITIES
 ###########################################
-def compute_daily_realized_volatility(df):
-    daily_vols = []
-    df['date'] = df['date_time'].dt.date
-    for date, group in df.groupby('date'):
-        vol = calculate_roger_satchell_volatility(group, window_days=1, annualize_days=365)
-        if not np.isnan(vol):
-            daily_vols.append(vol)
-    return daily_vols
+def calculate_realized_volatility(price_data, window_days=7):
+    """
+    Calculate annualized realized volatility using close-to-close returns.
+    
+    Args:
+        price_data (pd.DataFrame): DataFrame with 'date_time' and 'close' columns.
+        window_days (int): Rolling window size in days (default: 7).
+        
+    Returns:
+        pd.Series: Annualized realized volatility.
+    """
+    # Resample to daily closing prices
+    daily_close = price_data.resample('D', on='date_time')['close'].last().dropna()
+    
+    # Compute daily log returns
+    daily_returns = np.log(daily_close / daily_close.shift(1)).dropna()
+    
+    # Rolling sum of squared returns over the window
+    rolling_sum_sq_returns = daily_returns.rolling(window=window_days).apply(
+        lambda x: np.sum(x ** 2), raw=True
+    )
+    
+    # Annualized realized variance and volatility
+    realized_variance = rolling_sum_sq_returns * (365 / window_days)
+    realized_volatility = np.sqrt(realized_variance)
+    
+    return realized_volatility
 
 def compute_daily_average_iv(df_iv_agg):
     daily_iv = df_iv_agg["iv_mean"].resample("D").mean(numeric_only=True).dropna().tolist()
