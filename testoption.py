@@ -63,14 +63,10 @@ def get_valid_expiration_options(current_date=None):
     """Return the valid expiration day options based on today's date."""
     if current_date is None:
         current_date = dt.datetime.now()
-    # Before the 14th, both options (14 and 28) are available.
     if current_date.day < 14:
         return [14, 28]
-    # Between 14 (inclusive) and 28, only the 28th is available.
     elif current_date.day < 28:
         return [28]
-    # On or after the 28th, both dates have passed for the current month,
-    # so offer both options (which will be for the next month).
     else:
         return [14, 28]
 
@@ -90,7 +86,6 @@ def compute_expiry_date(selected_day, current_date=None):
             st.error("Invalid expiration date for current month.")
             return None
     else:
-        # Roll over to next month (handle December rollover)
         year = current_date.year + (current_date.month // 12)
         month = (current_date.month % 12) + 1
         try:
@@ -104,12 +99,6 @@ def compute_expiry_date(selected_day, current_date=None):
 # CREDENTIALS & LOGIN FUNCTIONS (from text files)
 ###########################################
 def load_credentials():
-    """
-    Load user credentials from two text files:
-    - usernames.txt: one username per line
-    - passwords.txt: one password per line (order corresponds to usernames)
-    Returns a dictionary mapping username to password.
-    """
     try:
         with open("usernames.txt", "r") as f_user:
             usernames = [line.strip() for line in f_user if line.strip()]
@@ -125,7 +114,6 @@ def load_credentials():
         return {}
 
 def login():
-    """Display a login form and validate credentials."""
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
     if not st.session_state.logged_in:
@@ -145,7 +133,6 @@ def login():
 # INSTRUMENTS FETCHING & FILTERING FUNCTIONS
 ###########################################
 def fetch_instruments():
-    """Fetch the instruments list from the Thalex API."""
     response = requests.get(url_instruments)
     if response.status_code != 200:
         raise Exception("Failed to fetch instruments")
@@ -153,10 +140,6 @@ def fetch_instruments():
     return data.get("result", [])
 
 def get_option_instruments(instruments, option_type, expiry_str):
-    """
-    Filter instruments for options (calls or puts) for BTC using the provided expiry.
-    Option type should be 'C' for calls or 'P' for puts.
-    """
     filtered = [
         inst["instrument_name"] for inst in instruments
         if inst["instrument_name"].startswith(f"BTC-{expiry_str}") and inst["instrument_name"].endswith(f"-{option_type}")
@@ -164,9 +147,6 @@ def get_option_instruments(instruments, option_type, expiry_str):
     return sorted(filtered)
 
 def get_actual_iv(instrument_name):
-    """
-    Fetch mark price data for the given instrument and return its latest iv_close value.
-    """
     response = requests.get(url_mark_price, params=params(instrument_name))
     if response.status_code != 200:
         return None
@@ -179,10 +159,6 @@ def get_actual_iv(instrument_name):
     return df["iv_close"].iloc[-1]
 
 def get_filtered_instruments(spot_price, expiry_str=DEFAULT_EXPIRY_STR, t_years=T_YEARS, multiplier=1):
-    """
-    Filter instruments based on the theoretical range derived from a standard deviation move.
-    Raises an exception if no valid instruments are found.
-    """
     instruments_list = fetch_instruments()
     calls_all = get_option_instruments(instruments_list, "C", expiry_str)
     puts_all = get_option_instruments(instruments_list, "P", expiry_str)
@@ -219,9 +195,6 @@ def get_filtered_instruments(spot_price, expiry_str=DEFAULT_EXPIRY_STR, t_years=
 ###########################################
 @st.cache_data(ttl=30)
 def fetch_data(instruments_tuple):
-    """
-    Fetches Thalex mark price data for the provided instruments over the past 7 days at 5m resolution.
-    """
     instruments = list(instruments_tuple)
     df = (
         pipe(
@@ -244,9 +217,6 @@ def fetch_data(instruments_tuple):
 
 @st.cache_data(ttl=30)
 def fetch_ticker(instrument_name):
-    """
-    Fetch ticker data for the given instrument.
-    """
     params = {"instrument_name": instrument_name}
     response = requests.get(URL_TICKER, params=params)
     if response.status_code != 200:
@@ -255,9 +225,6 @@ def fetch_ticker(instrument_name):
     return data.get("result", {})
 
 def fetch_kraken_data():
-    """
-    Fetch 7 days of 5m BTC/USD data from Kraken (via ccxt).
-    """
     kraken = ccxt.kraken()
     now_dt = dt.datetime.now()
     start_dt = now_dt - dt.timedelta(days=7)
@@ -277,11 +244,6 @@ def fetch_kraken_data():
 # COMPUTE ROLLING VRP FUNCTION
 ###########################################
 def compute_rolling_vrp(group, window_str):
-    """
-    Computes rolling variance risk premium (VRP) for a given group over the specified window.
-    Adjusts the realized volatility to an annualized basis using a 7-day window.
-    VRP = (rolling average of squared IV) - (annualized rolling sum of squared log returns)
-    """
     rolling_rv = group["log_return"].expanding(min_periods=1).apply(lambda x: np.nansum(x**2), raw=True)
     rolling_iv = group["iv_close"].rolling(window_str, min_periods=1).apply(lambda x: np.mean(x**2), raw=True)
     rolling_rv_annual = rolling_rv * (365 / 7)
@@ -292,9 +254,6 @@ def compute_rolling_vrp(group, window_str):
 # OPTION DELTA CALCULATION FUNCTION
 ###########################################
 def compute_delta(row, S):
-    """
-    Compute the Black-Scholes delta for an option.
-    """
     try:
         expiry_str = row["instrument_name"].split("-")[1]
         expiry_date = dt.datetime.strptime(expiry_str, "%d%b%y")
@@ -318,9 +277,6 @@ def compute_delta(row, S):
 # DELTA-BASED DYNAMIC REGIME FUNCTIONS
 ###########################################
 def compute_average_delta(df_calls, df_puts, S):
-    """
-    Compute average call and put delta for each timestamp.
-    """
     if "delta" not in df_calls.columns:
         df_calls["delta"] = df_calls.apply(lambda row: compute_delta(row, S), axis=1)
     if "delta" not in df_puts.columns:
@@ -340,9 +296,6 @@ def compute_average_delta(df_calls, df_puts, S):
     return df_merged
 
 def rolling_percentile_zones(df, column="delta_diff", window="1D", lower_percentile=30, upper_percentile=70):
-    """
-    Compute rolling percentile zones for the specified column.
-    """
     df = df.set_index("date_time").sort_index()
     def percentile_in_window(x, q):
         return np.percentile(x, q)
@@ -351,9 +304,6 @@ def rolling_percentile_zones(df, column="delta_diff", window="1D", lower_percent
     return df.reset_index()
 
 def classify_regime(row):
-    """
-    Classify regime based on delta_diff relative to rolling zones.
-    """
     if pd.isna(row["rolling_lower_zone"]) or pd.isna(row["rolling_upper_zone"]):
         return "Neutral"
     if row["delta_diff"] > row["rolling_upper_zone"]:
@@ -364,9 +314,6 @@ def classify_regime(row):
         return "Neutral"
 
 def compute_gamma(row, S):
-    """
-    Compute the Black-Scholes gamma for an option.
-    """
     try:
         expiry_str = row["instrument_name"].split("-")[1]
         expiry_date = dt.datetime.strptime(expiry_str, "%d%b%y")
@@ -388,9 +335,6 @@ def compute_gamma(row, S):
     return gamma
 
 def compute_gex(row, S, oi):
-    """
-    Compute Gamma Exposure (GEX) for an option.
-    """
     gamma = compute_gamma(row, S)
     if gamma is None or np.isnan(gamma):
         return np.nan
@@ -455,10 +399,6 @@ def plot_net_gex(df_gex, spot_price):
 # PERCENTILE-BASED RISK CLASSIFICATIONS
 ###########################################
 def classify_volatility_regime(current_vol, historical_vols):
-    """
-    Classify volatility regime based on the percentile rank of current volatility.
-    Returns: 'Low Volatility', 'Medium Volatility', or 'High Volatility'
-    """
     percentile = percentileofscore(historical_vols, current_vol)
     if percentile < 5:
         return "Low Volatility"
@@ -468,10 +408,6 @@ def classify_volatility_regime(current_vol, historical_vols):
         return "Medium Volatility"
 
 def classify_vrp_regime(current_vrp, historical_vrps):
-    """
-    Classify the VRP regime based on its historical percentile.
-    Returns a suggestion for positioning: 'Long Volatility', 'Short Volatility', or 'Neutral'
-    """
     percentile = percentileofscore(historical_vrps, current_vrp)
     if current_vrp < 0:
         return "Long Volatility"
@@ -486,10 +422,6 @@ def classify_vrp_regime(current_vrp, historical_vrps):
 # HISTORICAL DATA UTILITIES
 ###########################################
 def compute_daily_realized_volatility(df):
-    """
-    Compute realized volatility for each day from df (df_kraken).
-    Returns a list of daily realized volatility values.
-    """
     daily_vols = []
     df['date'] = df['date_time'].dt.date
     for date, group in df.groupby('date'):
@@ -499,16 +431,10 @@ def compute_daily_realized_volatility(df):
     return daily_vols
 
 def compute_daily_average_iv(df_iv_agg):
-    """
-    Compute daily average IV from the iv_mean column in df_iv_agg.
-    """
     daily_iv = df_iv_agg["iv_mean"].resample("D").mean(numeric_only=True).dropna().tolist()
     return daily_iv
 
 def compute_historical_vrp(daily_iv, daily_rv):
-    """
-    Compute historical VRP values from daily IV and daily realized volatility.
-    """
     n = min(len(daily_iv), len(daily_rv))
     return [daily_iv[i] - daily_rv[i] for i in range(n)]
 
@@ -516,10 +442,6 @@ def compute_historical_vrp(daily_iv, daily_rv):
 # REALIZED VOLATILITY FUNCTION
 ###########################################
 def calculate_realized_volatility(price_data, window_days=7):
-    """
-    Calculate realized volatility (annualized) from price data over a specified window.
-    Uses log returns from the "close" column and annualizes by sqrt(365) for a 24/7 market.
-    """
     if price_data.empty:
         return np.nan
     price_data = price_data.sort_values("date_time")
@@ -533,12 +455,13 @@ def calculate_realized_volatility(price_data, window_days=7):
 ###########################################
 def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv):
     """
-    For options within ±2% of the spot, group by strike and average the IV.
+    For options within ±2% (or adjusted tolerance) of the spot, group by strike and average the IV.
     Then compute EV for an ATM straddle using:
         EV = S * (RV - avg_IV) * sqrt(2T/π)
     Returns a DataFrame with candidate strikes, average IV, and EV.
     """
-    tolerance = spot_price * rv * np.sqrt(T_YEARS)  # Adjust based on RV and T
+    # Adjust tolerance based on RV and T (can be tuned)
+    tolerance = spot_price * 0.02  
     atm_candidates = [item for item in ticker_list if abs(item["strike"] - spot_price) <= tolerance]
     if not atm_candidates:
         return None
@@ -563,24 +486,19 @@ def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv):
 ###########################################
 def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None,
                             historical_vols=None, historical_vrps=None):
-    """
-    Evaluate market conditions and recommend a volatility trading strategy.
-    Uses IV, RV, delta, gamma, and historical percentile classifications for volatility and VRP.
-    """
-    if not historical_vols:
-        # Fetch last 30 days of data if daily_rv is empty
-        df_kraken_30d = fetch_kraken_data(days=30)  # Modify fetch_kraken_data to accept days parameter
-        historical_vols = compute_daily_realized_volatility(df_kraken_30d)
-                           
+    # If historical_vols is empty, you might fetch a longer history (omitted here for brevity)
     rv = calculate_realized_volatility(df_kraken)
     iv = df["iv_close"].mean() if not df.empty else np.nan
 
-    # Classify volatility and VRP regimes based on historical percentiles
+    # Add threshold check for IV/RV divergence (>20% difference)
+    divergence = abs(iv - rv) / rv if rv != 0 else np.nan
+    if divergence > 0.20:
+        st.write(f"Alert: IV and RV diverge by {divergence*100:.2f}% (threshold: 20%).")
+
     vol_regime = classify_volatility_regime(rv, historical_vols) if historical_vols and len(historical_vols) > 0 else "Neutral"
     current_vrp = iv - rv
     vrp_regime = classify_vrp_regime(current_vrp, historical_vrps) if historical_vrps and len(historical_vrps) > 0 else "Neutral"
 
-    # Open-interest–weighted delta calculations
     call_items = [item for item in ticker_list if item["option_type"] == "C"]
     put_items = [item for item in ticker_list if item["option_type"] == "P"]
     call_oi_total = sum(item["open_interest"] for item in call_items)
@@ -593,7 +511,6 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
     put_oi = df_ticker[df_ticker["option_type"] == "P"]["open_interest"].sum() if not df_ticker.empty else 0
     put_call_ratio = put_oi / call_oi if call_oi > 0 else np.inf
 
-    # Gamma metrics
     df_calls = df[df["option_type"] == "C"].copy()
     df_puts = df[df["option_type"] == "P"].copy()
     if "gamma" not in df_calls.columns:
@@ -603,7 +520,6 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
     avg_call_gamma = df_calls["gamma"].mean() if not df_calls.empty else 0
     avg_put_gamma = df_puts["gamma"].mean() if not df_puts.empty else 0
 
-    # Decision logic based on VRP regime and risk tolerance:
     if vrp_regime == "Long Volatility":
         if risk_tolerance == "Conservative":
             recommendation = "Long Volatility (Conservative): Buy limited OTM Puts"
@@ -654,14 +570,12 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
 # MODIFIED MAIN DASHBOARD
 ###########################################
 def main():
-    # Login Section
     login()  # Ensure user is logged in
     st.title("Crypto Options Visualization Dashboard (Plotly Version) with Volatility Trading Decisions")
     if st.button("Logout"):
         st.session_state.logged_in = False
         st.stop()
     
-    # EXPIRATION DATE SELECTION
     current_date = dt.datetime.now()
     valid_days = get_valid_expiration_options(current_date)
     selected_day = st.sidebar.selectbox("Choose Expiration Day", options=valid_days)
@@ -674,7 +588,6 @@ def main():
     T_YEARS = days_to_expiry / 365
     st.sidebar.markdown(f"**Using Expiration Date:** {expiry_str}")
     
-    # DEVIATION RANGE SELECTION
     deviation_option = st.sidebar.select_slider(
         "Choose Deviation Range",
         options=["1 Standard Deviation (68.2%)", "2 Standard Deviations (95.4%)"],
@@ -682,7 +595,6 @@ def main():
     )
     multiplier = 1 if "1 Standard" in deviation_option else 2
 
-    # Fetch Kraken data
     global df_kraken
     df_kraken = fetch_kraken_data()
     if df_kraken.empty:
@@ -708,7 +620,6 @@ def main():
     df_calls = df[df["option_type"] == "C"].copy().sort_values("date_time")
     df_puts = df[df["option_type"] == "P"].copy().sort_values("date_time")
     
-    # Compute aggregated IV for regime analysis
     df_iv_agg = (
         df.groupby("date_time", as_index=False)["iv_close"]
         .mean()
@@ -724,7 +635,6 @@ def main():
     )
     df_iv_agg_reset = df_iv_agg.reset_index()
 
-    # Build ticker_list for open interest, delta, and record IV using T_YEARS for proper delta calculation
     global ticker_list
     ticker_list = []
     for instrument in all_instruments:
@@ -756,12 +666,10 @@ def main():
             "iv": iv_val
         })
     
-    # Compute historical daily realized volatility and daily average IV
     daily_rv = compute_daily_realized_volatility(df_kraken)
     daily_iv = compute_daily_average_iv(df_iv_agg)
     historical_vrps = compute_historical_vrp(daily_iv, daily_rv)
     
-    # VOLATILITY TRADING DECISION TOOL using percentile-based risk classification
     st.subheader("Volatility Trading Decision Tool")
     risk_tolerance = st.sidebar.selectbox(
         "Risk Tolerance",
@@ -787,11 +695,9 @@ def main():
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
     
-    # For recommendations involving straddles, calculate the EV for ATM straddles.
     rv_overall = calculate_realized_volatility(df_kraken)
     df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_overall)
     if df_ev is not None and not df_ev.empty:
-        # Choose the candidate with the highest EV.
         best_candidate = df_ev.loc[df_ev["EV"].idxmax()]
         best_strike = best_candidate["Strike"]
         st.subheader("ATM Straddle EV Analysis")
@@ -806,7 +712,6 @@ def main():
         st.write("Position Size: Adjust based on capital (e.g., 1-5% of portfolio for chosen risk tolerance)")
         st.write("Monitor price and volatility in real-time and adjust hedges dynamically.")
     
-    # Gamma and GEX visualizations
     if not df_calls.empty and not df_puts.empty:
         df_calls["gamma"] = df_calls.apply(lambda row: compute_gamma(row, spot_price), axis=1)
         df_puts["gamma"] = df_puts.apply(lambda row: compute_gamma(row, spot_price), axis=1)
