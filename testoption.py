@@ -425,7 +425,7 @@ def compute_daily_realized_volatility(df):
     daily_vols = []
     df['date'] = df['date_time'].dt.date
     for date, group in df.groupby('date'):
-        vol = calculate_realized_volatility(group, window_days=1)
+        vol = calculate_parkinson_volatility(group, window_days=1)
         if not np.isnan(vol):
             daily_vols.append(vol)
     return daily_vols
