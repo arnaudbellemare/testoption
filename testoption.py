@@ -73,7 +73,6 @@ def get_valid_expiration_options(current_date=None):
 def compute_expiry_date(selected_day, current_date=None):
     """
     Compute the expiration date based on the selected day.
-    
     - If today is before the chosen day, use the current month.
     - Otherwise, roll over to the next month.
     """
@@ -236,22 +235,19 @@ def fetch_kraken_data():
     df_kraken["date_time"] = pd.to_datetime(df_kraken["timestamp"], unit="ms")
     df_kraken["date_time"] = df_kraken["date_time"].dt.tz_localize("UTC").dt.tz_convert("America/New_York")
     df_kraken = df_kraken.sort_values(by="date_time").reset_index(drop=True)
-# Get the timezone from the first timestamp in the column
+    # Get the timezone from the first timestamp in the column
     tzinfo = df_kraken["date_time"].iloc[0].tzinfo
     cutoff_start = (now_dt - dt.timedelta(days=7)).astimezone(tzinfo)
     df_kraken = df_kraken[df_kraken["date_time"] >= cutoff_start]
-
     return df_kraken
 
 ###########################################
-# COMPUTE ROLLING VRP FUNCTION
+# COMPUTE ROLLING VRP FUNCTION (using Roger-Satchell)
 ###########################################
 def compute_rolling_vrp(group, window_str):
     # Define a function to compute the Roger-Satchell variance for a single period.
     def rs_variance(row):
         try:
-            # Roger-Satchell formula:
-            # RS^2 = ln(High/Open) * ln(High/Close) + ln(Low/Open) * ln(Low/Close)
             rs1 = np.log(row["mark_price_high"] / row["mark_price_open"])
             rs2 = np.log(row["mark_price_high"] / row["mark_price_close"])
             rs3 = np.log(row["mark_price_low"] / row["mark_price_open"])
@@ -260,26 +256,12 @@ def compute_rolling_vrp(group, window_str):
         except Exception:
             return np.nan
 
-    # Work on a copy to avoid modifying the original group DataFrame.
     df = group.copy()
-    
-    # Compute RS variance for each row.
     df["rs_variance"] = df.apply(rs_variance, axis=1)
-    
-    # Compute rolling realized variance using the RS variance.
-    # Here we sum the RS variances over the window; depending on your preference,
-    # you might average instead.
     rolling_rv = df["rs_variance"].rolling(window_str, min_periods=1).sum()
-    
-    # Annualize the realized variance.
-    # The factor (365 / 7) assumes that window_str corresponds to a 7-day window.
-    # Adjust the factor if your window represents a different number of days.
+    # Annualize the realized variance (assuming window_str covers 7 days)
     rolling_rv_annual = rolling_rv * (365 / 7)
-    
-    # Compute rolling implied variance from iv_close.
     rolling_iv = df["iv_close"].rolling(window_str, min_periods=1).apply(lambda x: np.mean(x**2), raw=True)
-    
-    # The variance risk premium (VRP) is defined as implied variance minus realized variance.
     vrp = rolling_iv - rolling_rv_annual
     return vrp
 
@@ -458,7 +440,7 @@ def compute_daily_realized_volatility(df):
     daily_vols = []
     df['date'] = df['date_time'].dt.date
     for date, group in df.groupby('date'):
-        vol = calculate_roger_satchell_volatility(group, window_days=1)
+        vol = calculate_roger_satchell_volatility(group, window_days=1, annualize_days=365)
         if not np.isnan(vol):
             daily_vols.append(vol)
     return daily_vols
@@ -472,7 +454,7 @@ def compute_historical_vrp(daily_iv, daily_rv):
     return [daily_iv[i] - daily_rv[i] for i in range(n)]
 
 ###########################################
-# REALIZED VOLATILITY FUNCTION
+# REALIZED VOLATILITY FUNCTION (Roger-Satchell)
 ###########################################
 def calculate_roger_satchell_volatility(price_data, window_days=7, annualize_days=365):
     """
@@ -486,7 +468,7 @@ def calculate_roger_satchell_volatility(price_data, window_days=7, annualize_day
     Returns:
         float: Annualized Roger-Satchell volatility, or np.nan if data is insufficient.
     """
-    # Check if the required columns are present
+    # Check for required columns
     if price_data.empty or not set(['open', 'high', 'low', 'close']).issubset(price_data.columns):
         return np.nan
     
@@ -498,20 +480,20 @@ def calculate_roger_satchell_volatility(price_data, window_days=7, annualize_day
         'close': 'last'
     }).dropna()
     
-    # Ensure we have enough days of data
+    # Ensure enough days of data are available
     if len(daily_data) < window_days:
         return np.nan
 
-    # Use the last `window_days` of data
+    # Use the last 'window_days' of data
     daily_data = daily_data.iloc[-window_days:]
     
-    # Calculate the Roger-Satchell volatility for each day:
+    # Calculate the daily Roger-Satchell variance
     rs_squared = (
         np.log(daily_data['high'] / daily_data['open']) * np.log(daily_data['high'] / daily_data['close']) +
         np.log(daily_data['low'] / daily_data['open']) * np.log(daily_data['low'] / daily_data['close'])
     )
     
-    # Compute the mean daily RS variance and take the square root to get daily volatility
+    # Compute mean daily RS variance and then take square root for daily volatility
     daily_rs_vol = np.sqrt(rs_squared.mean())
     
     # Annualize the daily volatility
@@ -523,7 +505,7 @@ def calculate_roger_satchell_volatility(price_data, window_days=7, annualize_day
 ###########################################
 def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv):
     """
-    For options within ±2% (or adjusted tolerance) of the spot, group by strike and average the IV.
+    For options within ±2% of the spot, group by strike and average the IV.
     Then compute EV for an ATM straddle using:
         EV = S * (RV - avg_IV) * sqrt(2T/π)
     Returns a DataFrame with candidate strikes, average IV, and EV.
@@ -553,12 +535,11 @@ def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv):
 ###########################################
 def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None,
                            historical_vols=None, historical_vrps=None, days_to_expiration=7):
-    # Compute RV using Parkinson's method with fixed 30-day period (default)
+    # Compute realized volatility using the Roger-Satchell estimator with a 7-day window
     rv = calculate_roger_satchell_volatility(df_kraken, window_days=7, annualize_days=365)
-    
     iv = df["iv_close"].mean() if not df.empty else np.nan
 
-    # Add threshold check for IV/RV divergence (>20% difference)
+    # Alert if IV and RV diverge significantly
     divergence = abs(iv - rv) / rv if rv != 0 else np.nan
     if not np.isnan(divergence) and divergence > 0.20:
         st.write(f"Alert: IV and RV diverge by {divergence*100:.2f}% (threshold: 20%).")
@@ -633,6 +614,7 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
         "avg_call_gamma": avg_call_gamma,
         "avg_put_gamma": avg_put_gamma
     }
+
 ###########################################
 # MODIFIED MAIN DASHBOARD
 ###########################################
@@ -669,7 +651,6 @@ def main():
         return
     spot_price = df_kraken["close"].iloc[-1]
     st.write(f"Current BTC/USD Price: {spot_price:.2f}")
-    
     
     try:
         filtered_calls, filtered_puts = get_filtered_instruments(spot_price, expiry_str, T_YEARS, multiplier)
@@ -745,9 +726,9 @@ def main():
         index=1
     )
     trade_decision = evaluate_trade_strategy(df, spot_price, risk_tolerance, df_iv_agg_reset,
-                                           historical_vols=daily_rv,
-                                           historical_vrps=historical_vrps,
-                                           days_to_expiration=days_to_expiration)
+                                               historical_vols=daily_rv,
+                                               historical_vrps=historical_vrps,
+                                               days_to_expiration=days_to_expiration)
     
     st.write("### Market and Volatility Metrics")
     st.write(f"Implied Volatility (IV): {trade_decision['iv']:.2%}")
@@ -764,14 +745,16 @@ def main():
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
     
+    # Use the same 7-day window for overall realized volatility
     rv_overall = calculate_roger_satchell_volatility(df_kraken, window_days=7, annualize_days=365)
     df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_overall)
-    if df_ev is not None and not df_ev.empty:
-        best_candidate = df_ev.loc[df_ev["EV"].idxmax()]
+    if df_ev is not None and not df_ev.empty and not df_ev["EV"].isna().all():
+        df_ev_clean = df_ev.dropna(subset=["EV"])
+        best_candidate = df_ev_clean.loc[df_ev_clean["EV"].idxmax()]
         best_strike = best_candidate["Strike"]
         st.subheader("ATM Straddle EV Analysis")
         st.write("Candidate Strikes and their Expected Value (EV) in $:")
-        st.dataframe(df_ev)
+        st.dataframe(df_ev_clean)
         st.write(f"Recommended ATM Strike based on highest EV: {best_strike}")
     else:
         st.write("No ATM candidates found within tolerance for EV calculation.")
@@ -811,7 +794,7 @@ def main():
             annotation_position="bottom left"
         )
         fig_vol_smile.update_layout(height=400, width=600)
-        st.plotly_chart(fig_vol_smile, use_container_width=True)        
+        st.plotly_chart(fig_vol_smile, use_container_width=True)
         plot_gamma_heatmap(pd.concat([df_calls, df_puts]))
     
     gex_data = []
