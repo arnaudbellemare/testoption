@@ -428,11 +428,12 @@ def calculate_realized_volatility(price_data, window_days=7):
     """
     Calculate realized volatility (annualized) from price data over a specified window.
     Uses log returns and annualizes by sqrt(252) trading days.
+    Note: Uses the "close" column from Kraken data.
     """
     if price_data.empty:
         return np.nan
     price_data = price_data.sort_values("date_time")
-    log_returns = np.log(price_data["spot_close"] / price_data["spot_close"].shift(1))
+    log_returns = np.log(price_data["close"] / price_data["close"].shift(1))
     daily_vol = log_returns.rolling(window=int(window_days * 24 * 12), min_periods=1).std()  # ~336 intervals/day
     annualized_vol = daily_vol * np.sqrt(252)
     return annualized_vol.iloc[-1] if not annualized_vol.empty else np.nan
@@ -534,6 +535,7 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate"):
 # MODIFIED MAIN DASHBOARD
 ###########################################
 def main():
+    # Login Section
     login()  # Ensure user is logged in
     
     st.title("Crypto Options Visualization Dashboard (Plotly Version) with Volatility Trading Decisions")
@@ -541,7 +543,7 @@ def main():
     if st.button("Logout"):
         st.session_state.logged_in = False
         st.stop()
-
+    
     # EXPIRATION DATE SELECTION
     current_date = dt.datetime.now()
     valid_options = get_valid_expiration_options(current_date)
@@ -632,7 +634,7 @@ def main():
             "open_interest": oi,
             "delta": delta_est
         })
-
+    
     # NEW: VOLATILITY TRADING DECISION TOOL
     st.subheader("Volatility Trading Decision Tool")
     risk_tolerance = st.sidebar.selectbox(
@@ -663,14 +665,12 @@ def main():
         st.write("Position Size: Adjust based on capital (e.g., 1-5% of portfolio for chosen risk tolerance)")
         st.write("Monitor price and volatility in real-time and adjust hedges dynamically.")
     
-    # Existing gamma and GEX visualizations can be added below as desired.
-    # For example:
+    # Gamma and GEX visualizations
     if not df_calls.empty and not df_puts.empty:
         df_calls["gamma"] = df_calls.apply(lambda row: compute_gamma(row, spot_price), axis=1)
         df_puts["gamma"] = df_puts.apply(lambda row: compute_gamma(row, spot_price), axis=1)
         plot_gamma_heatmap(pd.concat([df_calls, df_puts]))
     
-    # GEX analysis
     gex_data = []
     for instrument in all_instruments:
         ticker_data = fetch_ticker(instrument)
