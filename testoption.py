@@ -519,13 +519,13 @@ def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv):
 def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None,
                            historical_vols=None, historical_vrps=None, days_to_expiration=7):
     # Compute RV using Parkinson's method with fixed 30-day period (default)
-    rv = calculate_parkinson_volatility_fixed(df_kraken, period=30, annualize_days=365)
+    rv = calculate_parkinson_volatility(df_kraken, period=30, annualize_days=365)
     
     if days_to_expiration > 30:  # Adjust for expiration if longer than 30 days
         rv = rv * np.sqrt(days_to_expiration / 30)
     elif days_to_expiration < 30:
         # For shorter expirations, use a shorter period (e.g., 10 days)
-        rv = calculate_parkinson_volatility_fixed(df_kraken, period=10, annualize_days=365)
+        rv = calculate_parkinson_volatility(df_kraken, period=10, annualize_days=365)
     
     iv = df["iv_close"].mean() if not df.empty else np.nan
 
