@@ -1,4 +1,4 @@
-import streamlit as st
+FGimport streamlit as st
 import datetime as dt
 import pandas as pd
 import requests
@@ -523,7 +523,8 @@ def compute_daily_average_iv(df_iv_agg):
     """
     Compute daily average IV from the iv_mean column in df_iv_agg.
     """
-    daily_iv = df_iv_agg.resample("D").mean()["iv_mean"].dropna().tolist()
+    # Ensure we only aggregate numeric data.
+    daily_iv = pd.to_numeric(df_iv_agg["iv_mean"], errors="coerce").resample("D").mean(numeric_only=True).dropna().tolist()
     return daily_iv
 
 def compute_historical_vrp(daily_iv, daily_rv):
