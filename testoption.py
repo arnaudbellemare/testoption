@@ -523,8 +523,8 @@ def compute_daily_average_iv(df_iv_agg):
     """
     Compute daily average IV from the iv_mean column in df_iv_agg.
     """
-    # Ensure we only aggregate numeric data.
-    daily_iv = pd.to_numeric(df_iv_agg["iv_mean"], errors="coerce").resample("D").mean(numeric_only=True).dropna().tolist()
+    # Ensure we aggregate only numeric values.
+    daily_iv = df_iv_agg["iv_mean"].resample("D").mean(numeric_only=True).dropna().tolist()
     return daily_iv
 
 def compute_historical_vrp(daily_iv, daily_rv):
@@ -640,6 +640,37 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
     }
 
 ###########################################
+# ADDITIONAL FUNCTION: CALCULATE EV FOR ATM STRADDLE
+###########################################
+def calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv):
+    """
+    For options within a ±2% range of the spot, group by strike and compute the average IV.
+    Then compute EV for an ATM straddle using:
+        EV = S * (RV - IV_avg) * sqrt(2T / π)
+    Returns a DataFrame with candidate strikes, average IV and EV.
+    """
+    tolerance = 0.02 * spot_price
+    atm_candidates = [item for item in ticker_list if abs(item["strike"] - spot_price) <= tolerance]
+    if not atm_candidates:
+        return None
+    # Group by strike and average the IV from available options
+    atm_strikes = {}
+    for item in atm_candidates:
+        strike = item["strike"]
+        if strike not in atm_strikes:
+            atm_strikes[strike] = {"iv_sum": item["iv"], "count": 1}
+        else:
+            atm_strikes[strike]["iv_sum"] += item["iv"]
+            atm_strikes[strike]["count"] += 1
+    ev_candidates = []
+    for strike, data in atm_strikes.items():
+        avg_iv = data["iv_sum"] / data["count"]
+        ev_value = spot_price * (rv - avg_iv) * np.sqrt(2 * T_YEARS / np.pi)
+        ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV": ev_value})
+    df_ev = pd.DataFrame(ev_candidates)
+    return df_ev.sort_values("Strike")
+
+###########################################
 # MODIFIED MAIN DASHBOARD
 ###########################################
 def main():
@@ -655,7 +686,6 @@ def main():
     # EXPIRATION DATE SELECTION
     current_date = dt.datetime.now()
     valid_days = get_valid_expiration_options(current_date)
-    # Display valid expiration days (e.g., [14] or [14, 28])
     selected_day = st.sidebar.selectbox("Choose Expiration Day", options=valid_days)
     expiry_date = compute_expiry_date(selected_day, current_date)
     if expiry_date is None or expiry_date < current_date:
@@ -744,7 +774,8 @@ def main():
             "strike": strike,
             "option_type": option_type,
             "open_interest": oi,
-            "delta": delta_est
+            "delta": delta_est,
+            "iv": iv_val
         })
     
     # Compute historical daily realized volatility and daily average IV
@@ -777,6 +808,18 @@ def main():
     st.write(f"**Recommendation:** {trade_decision['recommendation']}")
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
+    
+    # Compute EV for ATM straddle candidates using Black-Scholes approximation:
+    rv_overall = calculate_realized_volatility(df_kraken)
+    df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_overall)
+    if df_ev is not None and not df_ev.empty:
+        best_strike = df_ev.iloc[(df_ev["EV"].abs()).argmin()]["Strike"]
+        st.subheader("ATM Straddle EV Analysis")
+        st.write("Candidate Strikes and their EV (in $):")
+        st.dataframe(df_ev)
+        st.write(f"Recommended ATM Strike based on EV: {best_strike}")
+    else:
+        st.write("No ATM candidates found within tolerance for EV calculation.")
     
     if st.button("Simulate Trade"):
         st.write("Simulating trade based on recommendation...")
