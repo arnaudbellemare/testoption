@@ -223,41 +223,98 @@ def fetch_ticker(instrument_name):
     data = response.json()
     return data.get("result", {})
 
+###########################################
+# UPDATED KRAKEN DATA FETCH (Dual Timeframe)
+###########################################
 def fetch_kraken_data():
     kraken = ccxt.kraken()
     now_dt = dt.datetime.now()
     start_dt = now_dt - dt.timedelta(days=365)
-    since = int(start_dt.timestamp() * 1000)
-    ohlcv = kraken.fetch_ohlcv("BTC/USD", timeframe="5m", since=since, limit=3000)
-    df_kraken = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    if df_kraken.empty:
-        return pd.DataFrame()
-    df_kraken["date_time"] = pd.to_datetime(df_kraken["timestamp"], unit="ms")
-    df_kraken["date_time"] = df_kraken["date_time"].dt.tz_localize("UTC").dt.tz_convert("America/New_York")
-    df_kraken = df_kraken.sort_values(by="date_time").reset_index(drop=True)
-    tzinfo = df_kraken["date_time"].iloc[0].tzinfo
-    cutoff_start = (now_dt - dt.timedelta(days=7)).astimezone(tzinfo)
-    df_kraken = df_kraken[df_kraken["date_time"] >= cutoff_start]
-    return df_kraken
+    
+    # Fetch 5m data for real-time updates (last 30 days)
+    ohlcv_5m = kraken.fetch_ohlcv("BTC/USD", timeframe="5m",
+                                   since=int(start_dt.timestamp()) * 1000,
+                                   limit=3000)
+    
+    # Fetch daily data for volatility calculations
+    ohlcv_1d = kraken.fetch_ohlcv("BTC/USD", timeframe="1d",
+                                   since=int(start_dt.timestamp()) * 1000)
+    
+    # Process 5m data
+    df_5m = pd.DataFrame(ohlcv_5m, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df_5m["date_time"] = pd.to_datetime(df_5m["timestamp"], unit="ms")
+    df_5m = df_5m.set_index("date_time")
+    
+    # Process daily data
+    df_1d = pd.DataFrame(ohlcv_1d, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df_1d["date_time"] = pd.to_datetime(df_1d["timestamp"], unit="ms")
+    df_1d = df_1d.set_index("date_time")
+    
+    # Combine datasets and remove duplicate timestamps
+    full_df = pd.concat([df_5m, df_1d], axis=0).sort_index()
+    return full_df[~full_df.index.duplicated()]
 
 ###########################################
-# COMPUTE ROLLING VRP FUNCTION (using Roger-Satchell)
+# PARKINSON VOLATILITY CALCULATION
 ###########################################
-def compute_vrp(iv_series, realized_volatility_series):
+def calculate_parkinson_volatility(price_data, window_days=7, annualize_days=365):
     """
-    Compute Volatility Risk Premium (VRP) as IV² - RV².
+    Calculate volatility using Parkinson's High-Low Range estimator.
+    """
+    if price_data.empty or not {'high', 'low'}.issubset(price_data.columns):
+        return np.nan
     
-    Args:
-        iv_series (pd.Series): Implied volatility series.
-        realized_volatility_series (pd.Series): Realized volatility series.
-        
-    Returns:
-        pd.Series: VRP values.
-    """
-    iv_squared = iv_series ** 2
-    rv_squared = realized_volatility_series ** 2
-    vrp = iv_squared - rv_squared
-    return vrp
+    # Resample to daily high/low prices while preserving 5m data
+    daily_data = price_data.resample('D', on='date_time').agg({
+        'high': 'max',
+        'low': 'min'
+    }).dropna()
+    
+    if len(daily_data) < window_days:
+        return np.nan
+    
+    # Calculate daily log high-low ratio
+    daily_data['log_hl_ratio'] = np.log(daily_data['high'] / daily_data['low'])
+    
+    # Calculate Parkinson variance components
+    parkinson_var = daily_data['log_hl_ratio'].rolling(
+        window=window_days, min_periods=1
+    ).apply(lambda x: np.sum(x**2) / (4 * np.log(2) * window_days), raw=True)
+    
+    # Annualize and convert to volatility
+    annualized_vol = np.sqrt(parkinson_var * annualize_days)
+    
+    # Reindex to match original timestamps
+    return annualized_vol.reindex(price_data.index, method='ffill')
+
+###########################################
+# UPDATED HISTORICAL DATA UTILITIES
+###########################################
+def compute_daily_realized_volatility(df):
+    """Calculate daily Parkinson volatility values."""
+    daily_vols = []
+    df_daily = df.resample('D', on='date_time').agg({
+        'high': 'max',
+        'low': 'min'
+    }).dropna()
+    
+    for i in range(1, len(df_daily) + 1):
+        window = df_daily.iloc[max(0, i - 7):i]
+        if len(window) < 1:
+            continue
+        vol = calculate_parkinson_volatility(window, window_days=len(window))
+        daily_vols.append(vol.iloc[-1] if not vol.empty else np.nan)
+    
+    return [v for v in daily_vols if not np.isnan(v)]
+
+def compute_daily_average_iv(df_iv_agg):
+    daily_iv = df_iv_agg["iv_mean"].resample("D").mean(numeric_only=True).dropna().tolist()
+    return daily_iv
+
+def compute_historical_vrp(daily_iv, daily_rv):
+    """Compute historical VRP using Parkinson volatility (variance difference)."""
+    n = min(len(daily_iv), len(daily_rv))
+    return [(iv ** 2) - (rv ** 2) for iv, rv in zip(daily_iv[:n], daily_rv[:n])]
 
 ###########################################
 # OPTION DELTA CALCULATION FUNCTION
@@ -428,84 +485,6 @@ def classify_vrp_regime(current_vrp, historical_vrps):
         return "Neutral"
 
 ###########################################
-# HISTORICAL DATA UTILITIES
-###########################################
-def calculate_realized_volatility(price_data, window_days=7):
-    """
-    Calculate annualized realized volatility using close-to-close returns.
-    
-    Args:
-        price_data (pd.DataFrame): DataFrame with 'date_time' and 'close' columns.
-        window_days (int): Rolling window size in days (default: 7).
-        
-    Returns:
-        pd.Series: Annualized realized volatility.
-    """
-    # Resample to daily closing prices
-    daily_close = price_data.resample('D', on='date_time')['close'].last().dropna()
-    
-    # Compute daily log returns
-    daily_returns = np.log(daily_close / daily_close.shift(1)).dropna()
-    
-    # Rolling sum of squared returns over the window
-    rolling_sum_sq_returns = daily_returns.rolling(window=window_days).apply(
-        lambda x: np.sum(x ** 2), raw=True
-    )
-    
-    # Annualized realized variance and volatility
-    realized_variance = rolling_sum_sq_returns * (365 / window_days)
-    realized_volatility = np.sqrt(realized_variance)
-    
-    return realized_volatility
-
-def compute_daily_average_iv(df_iv_agg):
-    daily_iv = df_iv_agg["iv_mean"].resample("D").mean(numeric_only=True).dropna().tolist()
-    return daily_iv
-
-def compute_historical_vrp(daily_iv, daily_rv):
-    n = min(len(daily_iv), len(daily_rv))
-    return [daily_iv[i] - daily_rv[i] for i in range(n)]
-
-###########################################
-# REALIZED VOLATILITY FUNCTION (Roger-Satchell)
-###########################################
-def calculate_roger_satchell_volatility(price_data, window_days=7, annualize_days=365):
-    """
-    Calculate Realized Volatility using the Roger-Satchell estimator over a given window in days.
-    
-    Args:
-        price_data (pd.DataFrame): DataFrame with 'date_time', 'open', 'high', 'low', 'close' columns.
-        window_days (int): Number of days over which to compute the volatility.
-        annualize_days (int): Number of days per year for annualization.
-        
-    Returns:
-        float: Annualized Roger-Satchell volatility, or np.nan if data is insufficient.
-    """
-    if price_data.empty or not set(['open', 'high', 'low', 'close']).issubset(price_data.columns):
-        return np.nan
-    
-    daily_data = price_data.resample('D', on='date_time').agg({
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': 'last'
-    }).dropna()
-    
-    if len(daily_data) < window_days:
-        return np.nan
-
-    daily_data = daily_data.iloc[-window_days:]
-    
-    rs_squared = (
-        np.log(daily_data['high'] / daily_data['open']) * np.log(daily_data['high'] / daily_data['close']) +
-        np.log(daily_data['low'] / daily_data['open']) * np.log(daily_data['low'] / daily_data['close'])
-    )
-    
-    daily_rs_vol = np.sqrt(rs_squared.mean())
-    annualized_vol = daily_rs_vol * np.sqrt(annualize_days)
-    return annualized_vol
-
-###########################################
 # FUNCTION TO CALCULATE EXPECTED VALUE (EV) FOR ATM STRADDLE
 ###########################################
 def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv):
@@ -536,20 +515,24 @@ def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv):
     return df_ev.sort_values("EV", ascending=False)
 
 ###########################################
-# TRADE STRATEGY EVALUATION (USING PERCENTILES)
+# UPDATED TRADE STRATEGY EVALUATION
 ###########################################
 def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None,
-                           historical_vols=None, historical_vrps=None, days_to_expiration=7):
-    # Compute realized volatility using the Roger-Satchell estimator with a 7-day window
-    rv = calculate_roger_satchell_volatility(df_kraken, window_days=7, annualize_days=365)
-    iv = df["iv_close"].mean() if not df.empty else np.nan
+                            historical_vols=None, historical_vrps=None, days_to_expiration=7):
+    # Compute realized volatility using Parkinson estimator over a 7-day window
+    rv_vol = calculate_parkinson_volatility(df_kraken, window_days=7)
+    iv_vol = df["iv_close"].mean() if not df.empty else np.nan
 
-    divergence = abs(iv - rv) / rv if rv != 0 else np.nan
+    # Convert to variance terms for VRP calculation
+    rv_var = rv_vol ** 2 if not pd.isna(rv_vol) else np.nan
+    iv_var = iv_vol ** 2 if not pd.isna(iv_vol) else np.nan
+    current_vrp = iv_var - rv_var if (not pd.isna(iv_vol) and not pd.isna(rv_vol)) else np.nan
+
+    divergence = abs(iv_vol - rv_vol) / rv_vol if (rv_vol != 0 and not pd.isna(iv_vol)) else np.nan
     if not np.isnan(divergence) and divergence > 0.20:
         st.write(f"Alert: IV and RV diverge by {divergence*100:.2f}% (threshold: 20%).")
 
-    vol_regime = classify_volatility_regime(rv, historical_vols) if historical_vols and len(historical_vols) > 0 else "Neutral"
-    current_vrp = iv - rv
+    vol_regime = classify_volatility_regime(rv_vol, historical_vols) if historical_vols and len(historical_vols) > 0 else "Neutral"
     vrp_regime = classify_vrp_regime(current_vrp, historical_vrps) if historical_vrps and len(historical_vrps) > 0 else "Neutral"
 
     call_items = [item for item in ticker_list if item["option_type"] == "C"]
@@ -608,8 +591,8 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
         "recommendation": recommendation,
         "position": position,
         "hedge_action": hedge_action,
-        "iv": iv,
-        "rv": rv,
+        "iv": iv_vol,
+        "rv": rv_vol,
         "vol_regime": vol_regime,
         "vrp_regime": vrp_regime,
         "put_call_ratio": put_call_ratio,
@@ -749,7 +732,7 @@ def main():
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
     
-    # Use the same 7-day window for overall realized volatility
+    # Use the same 7-day window for overall realized volatility (for EV calculation)
     rv_overall = calculate_roger_satchell_volatility(df_kraken, window_days=7, annualize_days=365)
     df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_overall)
     if df_ev is not None and not df_ev.empty and not df_ev["EV"].isna().all():
