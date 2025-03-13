@@ -292,12 +292,19 @@ def calculate_parkinson_volatility(price_data, window_days=7, annualize_days=365
 ###########################################
 def compute_daily_realized_volatility(df):
     """Calculate daily Parkinson volatility values."""
-    daily_vols = []
-    df_daily = df.resample('D', on='date_time').agg({
-        'high': 'max',
-        'low': 'min'
-    }).dropna()
+    # Check if 'date_time' is a column; if not, assume the index is datetime
+    if 'date_time' in df.columns:
+        df_daily = df.resample('D', on='date_time').agg({
+            'high': 'max',
+            'low': 'min'
+        }).dropna()
+    else:
+        df_daily = df.resample('D').agg({
+            'high': 'max',
+            'low': 'min'
+        }).dropna()
     
+    daily_vols = []
     for i in range(1, len(df_daily) + 1):
         window = df_daily.iloc[max(0, i - 7):i]
         if len(window) < 1:
