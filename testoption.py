@@ -10,54 +10,9 @@ import plotly.graph_objects as go
 from scipy.stats import norm
 import math
 
-###########################################
-# EXPIRATION DATE SELECTION FUNCTIONS
-###########################################
-def get_valid_expiration_options(current_date=None):
-    """Return the valid expiration day options based on today's date."""
-    if current_date is None:
-        current_date = dt.datetime.now()
-    # Before the 14th, both options (14 and 28) are available.
-    if current_date.day < 14:
-        return [14, 28]
-    # Between 14 (inclusive) and 28, only the 28th is available.
-    elif current_date.day < 28:
-        return [28]
-    # On or after the 28th, both dates have passed for the current month,
-    # so offer both options (which will be for the next month).
-    else:
-        return [14, 28]
-
-def compute_expiry_date(selected_day, current_date=None):
-    """
-    Compute the expiration date based on the selected day.
-    
-    - If today is before the chosen day, use the current month.
-    - Otherwise, roll over to the next month.
-    """
-    if current_date is None:
-        current_date = dt.datetime.now()
-    # If current day is less than the selected day, expiration is in current month.
-    if current_date.day < selected_day:
-        try:
-            expiry = current_date.replace(day=selected_day, hour=0, minute=0, second=0, microsecond=0)
-        except ValueError:
-            st.error("Invalid expiration date for current month.")
-            return None
-    else:
-        # Roll over to next month (handle December rollover)
-        year = current_date.year + (current_date.month // 12)
-        month = (current_date.month % 12) + 1
-        try:
-            expiry = dt.datetime(year, month, selected_day)
-        except ValueError:
-            st.error("Invalid expiration date for next month.")
-            return None
-    return expiry
-
-###########################################
+# -------------------------------
 # Thalex API details
-###########################################
+# -------------------------------
 BASE_URL = "https://thalex.com/api/v2/public"
 instruments_endpoint = "instruments"  # Endpoint for fetching available instruments
 url_instruments = f"{BASE_URL}/{instruments_endpoint}"
@@ -68,6 +23,15 @@ URL_TICKER = f"{BASE_URL}/{TICKER_ENDPOINT}"
 
 # Dictionary for any rolling window configuration (currently one 7D window)
 windows = {"7D": "vrp_7d"}
+
+# For backward compatibility, default expiration date if not selected
+DEFAULT_EXPIRY_STR = "28MAR25"
+
+# Calculate actual time to expiry (using default if needed)
+expiry_date = dt.datetime.strptime(DEFAULT_EXPIRY_STR, "%d%b%y")
+current_date = dt.datetime.now()
+days_to_expiry = (expiry_date - current_date).days
+T_YEARS = days_to_expiry / 365  # Convert days to years
 
 def params(instrument_name):
     now = dt.datetime.now()
@@ -93,13 +57,35 @@ COLUMNS = [
 ]
 
 ###########################################
+# EXPIRATION DATE HELPER FUNCTIONS
+###########################################
+def get_valid_expiration_options(current_date):
+    """
+    Returns a list of valid expiration dates (as strings) for demonstration.
+    """
+    options = []
+    for days in [7, 14, 21]:
+        exp_date = current_date + dt.timedelta(days=days)
+        options.append(exp_date.strftime("%d%b%y").upper())
+    return options
+
+def compute_expiry_date(selected_day, current_date):
+    """
+    Converts a selected expiration day string into a datetime object.
+    """
+    try:
+        return dt.datetime.strptime(selected_day, "%d%b%y")
+    except Exception:
+        return None
+
+###########################################
 # CREDENTIALS & LOGIN FUNCTIONS (from text files)
 ###########################################
 def load_credentials():
     """
     Load user credentials from two text files:
     - usernames.txt: one username per line
-    - passwords.txt: one password per line, with the same order as usernames.txt
+    - passwords.txt: one password per line (order corresponds to usernames)
     Returns a dictionary mapping username to password.
     """
     try:
@@ -134,12 +120,10 @@ def login():
             creds = load_credentials()
             if username in creds and creds[username] == password:
                 st.session_state.logged_in = True
-                st.success("Logged in successfully! Click on login a second time to connect to the option app. Enjoy")
-                if hasattr(st, "experimental_rerun"):
-                    st.experimental_rerun()  
+                st.success("Logged in successfully!")
             else:
                 st.error("Invalid username or password")
-        st.stop()  # Prevent further execution until logged in
+        st.stop()
 
 ###########################################
 # INSTRUMENTS FETCHING & FILTERING FUNCTIONS
@@ -152,14 +136,14 @@ def fetch_instruments():
     data = response.json()
     return data.get("result", [])
 
-def get_option_instruments(instruments, option_type, expiry_str):
+def get_option_instruments(instruments, option_type):
     """
-    Filter instruments for options (calls or puts) for BTC with the specified expiry.
+    Filter instruments for options (calls or puts) for BTC with expiry (using default expiry).
     Option type should be 'C' for calls or 'P' for puts.
     """
     filtered = [
         inst["instrument_name"] for inst in instruments
-        if inst["instrument_name"].startswith(f"BTC-{expiry_str}") and inst["instrument_name"].endswith(f"-{option_type}")
+        if inst["instrument_name"].startswith("BTC-" + DEFAULT_EXPIRY_STR) and inst["instrument_name"].endswith(f"-{option_type}")
     ]
     return sorted(filtered)
 
@@ -178,13 +162,13 @@ def get_actual_iv(instrument_name):
     df = df.sort_values("ts")
     return df["iv_close"].iloc[-1]
 
-def get_filtered_instruments(spot_price, expiry_str, t_years, multiplier=1):
+def get_filtered_instruments(spot_price, expiry_str=DEFAULT_EXPIRY_STR, t_years=T_YEARS, multiplier=1):
     """
     Filter instruments based on the theoretical range derived from a standard deviation move.
     """
     instruments_list = fetch_instruments()
-    calls_all = get_option_instruments(instruments_list, "C", expiry_str)
-    puts_all = get_option_instruments(instruments_list, "P", expiry_str)
+    calls_all = get_option_instruments(instruments_list, "C")
+    puts_all = get_option_instruments(instruments_list, "P")
     
     strike_list = [(inst, int(inst.split("-")[2])) for inst in calls_all]
     strike_list.sort(key=lambda x: x[1])
@@ -413,12 +397,9 @@ def plot_gex_by_strike(df_gex):
 
 def plot_net_gex(df_gex, spot_price):
     st.subheader("Net Gamma Exposure by Strike")
-    df_gex_net = (
-        df_gex.groupby("strike", group_keys=False)
-              .apply(lambda x: x.loc[x["option_type"] == "C", "gex"].sum() - x.loc[x["option_type"] == "P", "gex"].sum())
-              .reset_index(name="net_gex")
-    )
-
+    df_gex_net = df_gex.groupby("strike").apply(
+        lambda x: x.loc[x["option_type"] == "C", "gex"].sum() - x.loc[x["option_type"] == "P", "gex"].sum()
+    ).reset_index(name="net_gex")
     df_gex_net["sign"] = df_gex_net["net_gex"].apply(lambda val: "Negative" if val < 0 else "Positive")
     fig_net_gex = px.bar(
         df_gex_net,
@@ -441,105 +422,140 @@ def plot_net_gex(df_gex, spot_price):
     st.plotly_chart(fig_net_gex, use_container_width=True)
 
 ###########################################
-# GVOL_DIRECTION & GVOL_GEX FUNCTIONS
+# NEW HELPER FUNCTIONS FOR DECISION-MAKING
 ###########################################
-def compute_gvol_direction(row):
+def calculate_realized_volatility(price_data, window_days=7):
     """
-    Compute the trade direction (GVOL_DIRECTION) using a heuristic algorithm.
+    Calculate realized volatility (annualized) from price data over a specified window.
+    Uses log returns and annualizes by sqrt(252) trading days.
     """
-    score = 0
-    if row["delta"] > 0:
-        score += 0.5
-    else:
-        score -= 0.5
-    if row.get("open_interest", 0) > 100:
-        score += 0.2
-    else:
-        score -= 0.2
-    score += np.random.uniform(-0.05, 0.05)
-    score *= 10  # scale factor
-    return 1 if score >= 0 else -1
+    if price_data.empty:
+        return np.nan
+    price_data = price_data.sort_values("date_time")
+    log_returns = np.log(price_data["spot_close"] / price_data["spot_close"].shift(1))
+    daily_vol = log_returns.rolling(window=int(window_days * 24 * 12), min_periods=1).std()  # ~336 intervals/day
+    annualized_vol = daily_vol * np.sqrt(252)
+    return annualized_vol.iloc[-1] if not annualized_vol.empty else np.nan
 
-def build_ticker_list(df, df_calls, df_puts, spot_price):
+def compare_volatility(iv, rv, threshold=0.1):
     """
-    Build a ticker list from the Thalex data.
+    Compare implied volatility (IV) to realized volatility (RV) to recommend volatility direction.
+    Returns "Vol Up" if IV < RV - threshold, "Vol Down" if IV > RV + threshold, "Neutral" otherwise.
     """
-    ticker_list = []
-    for instrument in df["instrument_name"].unique():
-        if not isinstance(instrument, str):
-            continue
-        try:
-            parts = instrument.split("-")
-            strike = int(parts[2])
-        except Exception:
-            continue
-        option_type = parts[-1]
-        ticker_data = fetch_ticker(instrument)
-        if not ticker_data or "open_interest" not in ticker_data:
-            continue
-        oi = ticker_data["open_interest"]
-        iv = ticker_data.get("iv", None)
-        if iv is None:
-            continue
-        T_est = 0.05  # placeholder for time to expiry
-        S = spot_price
-        try:
-            d1 = (np.log(S / strike) + 0.5 * iv**2 * T_est) / (iv * np.sqrt(T_est))
-        except Exception:
-            continue
-        delta_val = norm.cdf(d1) if option_type == "C" else norm.cdf(d1) - 1
-        gamma_val = np.nan
-        if option_type == "C":
-            temp = df_calls[df_calls["instrument_name"] == instrument]
-            if not temp.empty:
-                gamma_val = compute_gamma(temp.iloc[0], spot_price)
+    if pd.isna(iv) or pd.isna(rv):
+        return "Neutral"
+    if iv < rv - threshold:
+        return "Vol Up"
+    elif iv > rv + threshold:
+        return "Vol Down"
+    else:
+        return "Neutral"
+
+def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate"):
+    """
+    Evaluate market conditions and recommend a volatility trading strategy.
+    Uses IV, RV, delta, gamma, and open interest to suggest long vol, short vol, or gamma scalping.
+    Assumes global variables df_kraken, df_iv_agg_reset, and ticker_list are available.
+    """
+    rv = calculate_realized_volatility(df_kraken)
+    iv = df["iv_close"].mean() if not df.empty else np.nan
+    vol_direction = compare_volatility(iv, rv)
+    latest_regime = df_iv_agg_reset["market_regime"].iloc[-1] if not df_iv_agg_reset.empty else "Neutral"
+    
+    df_calls = df[df["option_type"] == "C"].copy()
+    df_puts = df[df["option_type"] == "P"].copy()
+    if "delta" not in df_calls.columns:
+        df_calls["delta"] = df_calls.apply(lambda row: compute_delta(row, spot_price), axis=1)
+    if "delta" not in df_puts.columns:
+        df_puts["delta"] = df_puts.apply(lambda row: compute_delta(row, spot_price), axis=1)
+    if "gamma" not in df_calls.columns:
+        df_calls["gamma"] = df_calls.apply(lambda row: compute_gamma(row, spot_price), axis=1)
+    if "gamma" not in df_puts.columns:
+        df_puts["gamma"] = df_puts.apply(lambda row: compute_gamma(row, spot_price), axis=1)
+    
+    avg_call_delta = df_calls["delta"].mean() if not df_calls.empty else 0
+    avg_put_delta = df_puts["delta"].mean() if not df_puts.empty else 0
+    avg_call_gamma = df_calls["gamma"].mean() if not df_calls.empty else 0
+    avg_put_gamma = df_puts["gamma"].mean() if not df_puts.empty else 0
+    
+    df_ticker = pd.DataFrame(ticker_list) if ticker_list else pd.DataFrame()
+    total_oi = df_ticker["open_interest"].sum() if not df_ticker.empty else 0
+    put_oi = df_ticker[df_ticker["option_type"] == "P"]["open_interest"].sum() if not df_ticker.empty else 0
+    call_oi = df_ticker[df_ticker["option_type"] == "C"]["open_interest"].sum() if not df_ticker.empty else 0
+    put_call_ratio = put_oi / call_oi if call_oi > 0 else np.nan
+    
+    recommendation = "Neutral"
+    position = None
+    hedge_action = None
+    
+    if risk_tolerance == "Aggressive":
+        if vol_direction == "Vol Up" or latest_regime == "Risk-Off":
+            recommendation = "Long Volatility"
+            position = "Buy Straddle/Strangle (Calls & Puts)"
+            hedge_action = "Delta hedge by selling BTC futures"
+        elif vol_direction == "Vol Down" or latest_regime == "Risk-On":
+            recommendation = "Short Volatility"
+            position = "Sell Straddle/Spread (Calls & Puts)"
+            hedge_action = "Monitor for volatility spikes; prepare to buy back if IV rises"
         else:
-            temp = df_puts[df_puts["instrument_name"] == instrument]
-            if not temp.empty:
-                gamma_val = compute_gamma(temp.iloc[0], spot_price)
-        if np.isnan(gamma_val):
-            gamma_val = np.random.uniform(0.01, 0.05)
-        ticker_list.append({
-            "instrument": instrument,
-            "strike": strike,
-            "option_type": option_type,
-            "open_interest": oi,
-            "delta": delta_val,
-            "gamma": gamma_val
-        })
-    return ticker_list
+            recommendation = "Gamma Scalping"
+            position = "Buy ATM Straddle, maintain Delta-neutral"
+            hedge_action = "Dynamically hedge using BTC futures"
+    else:  # Moderate or Conservative
+        if vol_direction == "Vol Up" and put_call_ratio > 1 and latest_regime == "Risk-Off":
+            recommendation = "Long Volatility (Conservative)"
+            position = "Buy OTM Puts"
+            hedge_action = "Limit position size; hedge lightly with BTC futures short"
+        elif vol_direction == "Vol Down" and put_call_ratio < 1 and latest_regime == "Risk-On":
+            recommendation = "Short Volatility (Conservative)"
+            position = "Sell OTM Calls"
+            hedge_action = "Limit exposure; hedge with small BTC futures long"
+        else:
+            recommendation = "Gamma Scalping (Conservative)"
+            position = "Buy small ATM Straddle"
+            hedge_action = "Light delta hedging and monitor closely"
+    
+    return {
+        "recommendation": recommendation,
+        "position": position,
+        "hedge_action": hedge_action,
+        "iv": iv,
+        "rv": rv,
+        "vol_direction": vol_direction,
+        "market_regime": latest_regime,
+        "put_call_ratio": put_call_ratio,
+        "avg_call_delta": avg_call_delta,
+        "avg_put_delta": avg_put_delta,
+        "avg_call_gamma": avg_call_gamma,
+        "avg_put_gamma": avg_put_gamma
+    }
 
 ###########################################
-# MAIN DASHBOARD
+# MODIFIED MAIN DASHBOARD
 ###########################################
 def main():
-    login()  # Ensure user is logged in before proceeding
+    login()  # Ensure user is logged in
     
-    st.title("Crypto Options Visualization Dashboard (Plotly Version)")
+    st.title("Crypto Options Visualization Dashboard (Plotly Version) with Volatility Trading Decisions")
     
-    # Optional Logout Button
     if st.button("Logout"):
         st.session_state.logged_in = False
-        st.stop()  # Stop execution; next run will show the login screen
-    
-    # -------------------------------
+        st.stop()
+
     # EXPIRATION DATE SELECTION
-    # -------------------------------
     current_date = dt.datetime.now()
     valid_options = get_valid_expiration_options(current_date)
     selected_day = st.sidebar.selectbox("Choose Expiration Day", options=valid_options)
     expiry_date = compute_expiry_date(selected_day, current_date)
     if expiry_date is None or expiry_date < current_date:
-        st.error("Wrong expiration date already passed")
+        st.error("Expiration date is invalid or already passed")
         st.stop()
     expiry_str = expiry_date.strftime("%d%b%y").upper()
     days_to_expiry = (expiry_date - current_date).days
-    T_YEARS = days_to_expiry / 365  # Convert days to years
+    T_YEARS = days_to_expiry / 365
     st.sidebar.markdown(f"**Using Expiration Date:** {expiry_str}")
     
-    # -------------------------------
     # DEVIATION RANGE SELECTION
-    # -------------------------------
     deviation_option = st.sidebar.select_slider(
         "Choose Deviation Range",
         options=["1 Standard Deviation (68.2%)", "2 Standard Deviations (95.4%)"],
@@ -547,6 +563,8 @@ def main():
     )
     multiplier = 1 if "1 Standard" in deviation_option else 2
 
+    # Fetch Kraken data
+    global df_kraken
     df_kraken = fetch_kraken_data()
     if df_kraken.empty:
         st.error("No data fetched from Kraken. Check your ccxt config or timeframe.")
@@ -571,139 +589,21 @@ def main():
     df_calls = df[df["option_type"] == "C"].copy().sort_values("date_time")
     df_puts = df[df["option_type"] == "P"].copy().sort_values("date_time")
     
-    df_kraken_renamed = df_kraken.rename(columns={
-        "open": "spot_open", "high": "spot_high", "low": "spot_low", "close": "spot_close"
-    })
-    
-    first_instrument = all_instruments[0]
-    df_mark = df[df["instrument_name"] == first_instrument].copy().sort_values("date_time")
-    df_merged = pd.merge(
-        df_mark,
-        df_kraken_renamed[["date_time", "spot_open", "spot_high", "spot_low", "spot_close"]],
-        on="date_time", how="inner"
-    ).sort_values("date_time")
-    
-    st.subheader("Candlestick Chart (Single Instrument - Mark Price)")
-    df_candle = df_mark.sort_values(by="date_time")
-    fig_candlestick = go.Figure(data=[go.Candlestick(
-        x=df_candle["date_time"],
-        open=df_candle["mark_price_open"],
-        high=df_candle["mark_price_high"],
-        low=df_candle["mark_price_low"],
-        close=df_candle["mark_price_close"]
-    )])
-    fig_candlestick.update_layout(title="Candlestick Chart (Single Instrument)",
-                                  xaxis_title="Date",
-                                  yaxis=dict(showticklabels=False, title=""))
-    st.plotly_chart(fig_candlestick, use_container_width=True)
-    
-    st.subheader("Mark Price with Mean Line - Calls")
-    if not df_calls.empty:
-        date_range_str_calls = f"{df_calls['date_time'].iloc[0].strftime('%d %b %y %I:%M %p')} — {df_calls['date_time'].iloc[-1].strftime('%d %b %y %I:%M %p')}"
-        mean_mark_calls = df_calls['mark_price_close'].mean()
-        fig_mark_price_calls = go.Figure()
-        for instrument in df_calls['instrument_name'].unique():
-            df_inst = df_calls[df_calls['instrument_name'] == instrument]
-            fig_mark_price_calls.add_trace(
-                go.Scatter(
-                    x=df_inst['date_time'],
-                    y=df_inst['mark_price_close'],
-                    mode='lines',
-                    line=dict(width=2),
-                    opacity=0.8,
-                    name=instrument
-                )
-            )
-        fig_mark_price_calls.add_shape(
-            type="line",
-            x0=df_calls['date_time'].min(),
-            x1=df_calls['date_time'].max(),
-            y0=mean_mark_calls,
-            y1=mean_mark_calls,
-            line=dict(dash="dash", color="firebrick"),
-            xref="x",
-            yref="y"
-        )
-        fig_mark_price_calls.update_layout(
-            height=400,
-            width=800,
-            xaxis_title="Date",
-            yaxis_title="Mark Price (Calls)",
-            showlegend=True,
-            title_text=f"Mark Price with Mean Line - Calls\n{date_range_str_calls}"
-        )
-        fig_mark_price_calls.update_xaxes(tickformat="%m/%d %H:%M")
-        st.plotly_chart(fig_mark_price_calls, use_container_width=True)
-    else:
-        st.warning("No call data available.")
-    
-    st.subheader("Mark Price with Mean Line - Puts")
-    if not df_puts.empty:
-        date_range_str_puts = f"{df_puts['date_time'].iloc[0].strftime('%d %b %y %I:%M %p')} — {df_puts['date_time'].iloc[-1].strftime('%d %b %y %I:%M %p')}"
-        mean_mark_puts = df_puts['mark_price_close'].mean()
-        fig_mark_price_puts = go.Figure()
-        for instrument in df_puts['instrument_name'].unique():
-            df_inst = df_puts[df_puts['instrument_name'] == instrument]
-            fig_mark_price_puts.add_trace(
-                go.Scatter(
-                    x=df_inst['date_time'],
-                    y=df_inst['mark_price_close'],
-                    mode='lines',
-                    line=dict(width=2),
-                    opacity=0.8,
-                    name=instrument
-                )
-            )
-        fig_mark_price_puts.add_shape(
-            type="line",
-            x0=df_puts['date_time'].min(),
-            x1=df_puts['date_time'].max(),
-            y0=mean_mark_puts,
-            y1=mean_mark_puts,
-            line=dict(dash="dash", color="firebrick"),
-            xref="x",
-            yref="y"
-        )
-        fig_mark_price_puts.update_layout(
-            height=400,
-            width=800,
-            xaxis_title="Date",
-            yaxis_title="Mark Price (Puts)",
-            showlegend=True,
-            title_text=f"Mark Price with Mean Line - Puts\n{date_range_str_puts}"
-        )
-        fig_mark_price_puts.update_xaxes(tickformat="%m/%d %H:%M")
-        st.plotly_chart(fig_mark_price_puts, use_container_width=True)
-    else:
-        st.warning("No put data available.")    
-    
-    st.subheader("IV with Optimal Hedge Zone")
-    fig_iv_mean = px.line(
-        df,
-        x='date_time',
-        y='iv_close',
-        color='instrument_name',
-        title="IV with Optimal Hedge Zone"
+    # Compute aggregated IV for regime analysis
+    df_iv_agg = (
+        df.groupby("date_time", as_index=False)["iv_close"]
+        .mean()
+        .rename(columns={"iv_close": "iv_mean"})
     )
-    fig_iv_mean.update_traces(line=dict(width=2), opacity=0.8)
-    mean_iv = df['iv_close'].mean()
-    fig_iv_mean.add_hline(
-        y=mean_iv,
-        line_dash='dash',
-        line_color='firebrick',
-        annotation_text='Mean IV',
-        annotation_position='top left'
-    )
-    fig_iv_mean.update_layout(
-        width=800,
-        height=400,
-        xaxis_title="Date",
-        yaxis_title="IV"
-    )
-    fig_iv_mean.update_xaxes(tickformat="%m/%d %H:%M")
-    st.plotly_chart(fig_iv_mean, use_container_width=True)        
+    df_iv_agg = df_iv_agg.sort_values("date_time").reset_index(drop=True)
+    df_iv_agg["date_time"] = pd.to_datetime(df_iv_agg["date_time"])
+    df_iv_agg = df_iv_agg.set_index("date_time")
+    df_iv_agg = df_iv_agg.resample("5T").mean().ffill()
+    global df_iv_agg_reset
+    df_iv_agg_reset = df_iv_agg.reset_index()
 
-    st.subheader("Open Interest & Delta (Options)")
+    # Build ticker_list for open interest and delta analysis
+    global ticker_list
     ticker_list = []
     for instrument in all_instruments:
         ticker_data = fetch_ticker(instrument)
@@ -716,13 +616,12 @@ def main():
         except Exception:
             continue
         option_type = instrument.split("-")[-1]
-        iv = ticker_data.get("iv", None)
-        if iv is None:
+        iv_val = ticker_data.get("iv", None)
+        if iv_val is None:
             continue
         T_est = 0.05
-        S = spot_price
         try:
-            d1 = (np.log(S / strike) + 0.5 * iv**2 * T_est) / (iv * np.sqrt(T_est))
+            d1 = (np.log(spot_price / strike) + 0.5 * iv_val**2 * T_est) / (iv_val * np.sqrt(T_est))
         except Exception:
             continue
         delta_est = norm.cdf(d1) if option_type == "C" else norm.cdf(d1) - 1
@@ -733,310 +632,45 @@ def main():
             "open_interest": oi,
             "delta": delta_est
         })
-    if ticker_list:
-        df_ticker = pd.DataFrame(ticker_list)
-        fig_bubble = px.scatter(
-            df_ticker,
-            x="strike",
-            y="open_interest",
-            size="open_interest",
-            color="delta",
-            color_continuous_scale=px.colors.diverging.RdBu,
-            hover_data=["instrument", "delta"],
-            title="Open Interest & Delta for Options"
-        )
-        st.plotly_chart(fig_bubble, use_container_width=True)
-        
-        tot = df_ticker["open_interest"].sum()
-        rat = (df_ticker.apply(lambda r: r["open_interest"] if r["option_type"]=="P" and r["delta"]<0 else 0, axis=1).sum() / tot) if tot else 0
-        stat = "Risk-Off" if rat > 0.5 else "Risk-On"
-        st.markdown(f"### {stat} (Put OI Ratio: {rat:.2f})")
-        fig_indicator = go.Figure(go.Indicator(
-            mode="gauge+number+delta", 
-            value=rat*100,
-            title={'text': "Put OI Ratio (%)"},
-            delta={'reference': 50},
-            gauge={
-                'axis': {'range': [0, 100]},
-                'bar': {'color': "darkblue"},
-                'steps': [
-                    {'range': [0, 50], 'color': "lightgreen"},
-                    {'range': [50, 100], 'color': "lightcoral"}
-                ],
-                'threshold': {'value': 50, 'line': {'color': "black", 'width': 4}, 'thickness': 0.75}
-            }
-        ))
-        fig_indicator.update_layout(height=350, width=450)
-        st.plotly_chart(fig_indicator, use_container_width=False)
-    else:
-        st.warning("No ticker data available for OI & Delta.")
-    
-    st.subheader("Segmented Rolling IV-based Market Regime from 'Optimal Hedge Zone'")
-    df_iv_agg = (
-        df.groupby("date_time", as_index=False)["iv_close"]
-        .mean()
-        .rename(columns={"iv_close": "iv_mean"})
-    )
-    df_iv_agg = df_iv_agg.sort_values("date_time").reset_index(drop=True)
-    df_iv_agg["date_time"] = pd.to_datetime(df_iv_agg["date_time"])
-    df_iv_agg = df_iv_agg.set_index("date_time")
-    df_iv_agg = df_iv_agg.resample("5min").mean().ffill()
-    df_iv_agg["iv_rolling_mean"] = df_iv_agg["iv_mean"].rolling("1D").mean()
-    df_iv_agg["iv_rolling_std"] = df_iv_agg["iv_mean"].rolling("1D").std()
-    df_iv_agg["upper_zone"] = df_iv_agg["iv_rolling_mean"] + df_iv_agg["iv_rolling_std"]
-    df_iv_agg["lower_zone"] = df_iv_agg["iv_rolling_mean"] - df_iv_agg["iv_rolling_std"]
-    df_iv_agg.dropna(subset=["iv_rolling_mean", "iv_rolling_std", "upper_zone", "lower_zone"], inplace=True)
-    
-    def label_regime(iv_value, low, high):
-        if iv_value > high:
-            return "Risk-Off"
-        elif iv_value < low:
-            return "Risk-On"
-        else:
-            return "Neutral"
-    
-    df_iv_agg["market_regime"] = df_iv_agg.apply(
-        lambda row: label_regime(row["iv_mean"], row["lower_zone"], row["upper_zone"]),
-        axis=1
-    )
-    df_iv_agg_reset = df_iv_agg.reset_index()
-    df_iv_agg_reset["regime_segment"] = (
-        df_iv_agg_reset["market_regime"] != df_iv_agg_reset["market_regime"].shift()
-    ).cumsum()
-    
-    fig_iv_regime = go.Figure()
-    fig_iv_regime.add_trace(
-        go.Scatter(
-            x=df_iv_agg_reset["date_time"],
-            y=df_iv_agg_reset["upper_zone"],
-            mode="lines",
-            line=dict(color="gray", dash="dot"),
-            name="Upper Zone",
-            connectgaps=True
-        )
-    )
-    fig_iv_regime.add_trace(
-        go.Scatter(
-            x=df_iv_agg_reset["date_time"],
-            y=df_iv_agg_reset["lower_zone"],
-            mode="lines",
-            line=dict(color="gray", dash="dot"),
-            name="Lower Zone",
-            connectgaps=True
-        )
-    )
-    regime_colors = {"Risk-On": "green", "Risk-Off": "red", "Neutral": "blue"}
-    used_regimes = set()
-    for seg_id, seg_data in df_iv_agg_reset.groupby("regime_segment"):
-        current_regime = seg_data["market_regime"].iloc[0]
-        show_legend = current_regime not in used_regimes
-        if show_legend:
-            used_regimes.add(current_regime)
-        fig_iv_regime.add_trace(
-            go.Scatter(
-                x=seg_data["date_time"],
-                y=seg_data["iv_mean"],
-                mode="lines",
-                name=current_regime,
-                line=dict(color=regime_colors.get(current_regime, "gray"), width=3),
-                showlegend=show_legend,
-                connectgaps=True
-            )
-        )
-    fig_iv_regime.update_layout(
-        title="Segmented Rolling IV vs. 'Optimal Hedge Zone' (Market Regime)",
-        xaxis_title="Date",
-        yaxis_title="Rolling IV"
-    )
-    st.plotly_chart(fig_iv_regime, use_container_width=True)
-    
-    st.subheader("Segmented Rolling Skew-based Market Regime (Calls vs. Puts)")
-    df_calls_mean = (
-        df_calls.groupby('date_time', as_index=False)['mark_price_close']
-        .mean()
-        .rename(columns={'mark_price_close': 'mean_calls'})
-    )
-    df_puts_mean = (
-        df_puts.groupby('date_time', as_index=False)['mark_price_close']
-        .mean()
-        .rename(columns={'mark_price_close': 'mean_puts'})
-    )
-    df_mean_diff = pd.merge(df_calls_mean, df_puts_mean, on='date_time', how='outer').sort_values('date_time')
-    df_mean_diff['mean_diff'] = df_mean_diff['mean_calls'] - df_mean_diff['mean_puts']
-    df_mean_diff['date_time'] = pd.to_datetime(df_mean_diff['date_time'])
-    df_mean_diff = df_mean_diff.set_index('date_time').sort_index()
-    df_mean_diff = df_mean_diff.resample('5min').mean().ffill()
-    df_mean_diff['rolling_mean'] = df_mean_diff['mean_diff'].rolling('1D', min_periods=1).mean()
-    df_mean_diff['rolling_std'] = df_mean_diff['mean_diff'].rolling('1D', min_periods=1).std()
-    df_mean_diff['upper_zone'] = df_mean_diff['rolling_mean'] + df_mean_diff['rolling_std']
-    df_mean_diff['lower_zone'] = df_mean_diff['rolling_mean'] - df_mean_diff['rolling_std']
-    df_mean_diff.dropna(subset=['rolling_mean', 'rolling_std', 'upper_zone', 'lower_zone'], inplace=True)
-    
-    def label_skew_regime(diff_val, low, high):
-        if diff_val > high:
-            return "Strong Risk-On"
-        elif diff_val < low:
-            return "Strong Risk-Off"
-        else:
-            return "Neutral"
-    df_mean_diff['skew_regime'] = df_mean_diff.apply(
-        lambda row: label_skew_regime(row['mean_diff'], row['lower_zone'], row['upper_zone']),
-        axis=1
-    )
-    df_mean_diff_reset = df_mean_diff.reset_index()
-    df_mean_diff_reset['regime_segment'] = (
-        df_mean_diff_reset['skew_regime'] != df_mean_diff_reset['skew_regime'].shift()
-    ).cumsum()
-    
-    fig_skew_segments = go.Figure()
-    fig_skew_segments.add_trace(
-        go.Scatter(
-            x=df_mean_diff_reset['date_time'],
-            y=df_mean_diff_reset['upper_zone'],
-            mode='lines',
-            line=dict(color="gray", dash='dot'),
-            name='Upper Zone',
-            connectgaps=True
-        )
-    )
-    fig_skew_segments.add_trace(
-        go.Scatter(
-            x=df_mean_diff_reset['date_time'],
-            y=df_mean_diff_reset['lower_zone'],
-            mode='lines',
-            line=dict(color="gray", dash='dot'),
-            name='Lower Zone',
-            connectgaps=True
-        )
-    )
-    skew_colors = {
-        'Strong Risk-On': 'blue',
-        'Strong Risk-Off': 'red',
-        'Neutral': 'lightblue'
-    }
-    used_regimes = set()
-    for seg_id, seg_data in df_mean_diff_reset.groupby('regime_segment'):
-        current_regime = seg_data['skew_regime'].iloc[0]
-        show_legend = current_regime not in used_regimes
-        if show_legend:
-            used_regimes.add(current_regime)
-        fig_skew_segments.add_trace(
-            go.Scatter(
-                x=seg_data['date_time'],
-                y=seg_data['mean_diff'],
-                mode='lines',
-                name=current_regime,
-                line=dict(color=skew_colors.get(current_regime, 'gray'), width=3),
-                showlegend=show_legend,
-                connectgaps=True
-            )
-        )
-    fig_skew_segments.update_layout(
-        title="Segmented Rolling Skew-based Market Regime (Calls vs. Puts)",
-        xaxis_title="Date/Time",
-        yaxis_title="Mean Diff (Calls - Puts)"
-    )
-    st.plotly_chart(fig_skew_segments, use_container_width=True)    
-    
-    st.subheader("Segmented Rolling Skew-based Market Regime (Calls vs. Puts)")
-    df_calls_mean = (
-        df_calls.groupby('date_time', as_index=False)['mark_price_close']
-        .mean()
-        .rename(columns={'mark_price_close': 'mean_calls'})
-    )
-    df_puts_mean = (
-        df_puts.groupby('date_time', as_index=False)['mark_price_close']
-        .mean()
-        .rename(columns={'mark_price_close': 'mean_puts'})
-    )
-    df_mean_diff = pd.merge(df_calls_mean, df_puts_mean, on='date_time', how='outer').sort_values('date_time')
-    df_mean_diff['mean_diff'] = df_mean_diff['mean_calls'] - df_mean_diff['mean_puts']
-    df_mean_diff['market_regime'] = np.where(
-        df_mean_diff['mean_diff'] > 0, 
-        'Risk-On', 
-        np.where(df_mean_diff['mean_diff'] < 0, 'Risk-Off', 'Neutral')
-    )
-    fig_skew_regime = px.scatter(
-        df_mean_diff,
-        x='date_time',
-        y='mean_diff',
-        color='market_regime',
-        title='Skew-based Market Regime (Calls vs. Puts)',
-        labels={'mean_diff': 'Mean Calls - Mean Puts'}
-    )
-    fig_skew_regime.add_hline(y=0, line_dash="dash", line_color="gray")
-    st.plotly_chart(fig_skew_regime, use_container_width=True)        
-    
-    st.subheader("Volatility Smile at Latest Timestamp")
-    latest_ts = df["date_time"].max()
-    smile_df = df[df["date_time"] == latest_ts]
-    if not smile_df.empty:
-        atm_strike = smile_df.loc[smile_df["mark_price_close"].idxmax(), "k"]
-        smile_df = smile_df.sort_values(by="k")
-        fig_vol_smile = px.line(
-            smile_df,
-            x="k", y="iv_close",
-            markers=True,
-            title=f"Volatility Smile at {latest_ts.strftime('%d %b %H:%M')}",
-            labels={"iv_close": "IV", "k": "Strike"}
-        )
-        cheap_hedge_strike = smile_df.loc[smile_df["iv_close"].idxmin(), "k"]
-        fig_vol_smile.add_vline(
-            x=cheap_hedge_strike,
-            line=dict(dash="dash", color="green"),
-            annotation_text=f"Cheap Hedge ({cheap_hedge_strike})",
-            annotation_position="top"
-        )
-        fig_vol_smile.add_vline(
-            x=spot_price,
-            line=dict(dash="dash", color="blue"),
-            annotation_text=f"Price: {spot_price:.2f}",
-            annotation_position="bottom left"
-        )
-        fig_vol_smile.update_layout(height=400, width=600)
-        st.plotly_chart(fig_vol_smile, use_container_width=True)
-    
-    st.subheader("Mark Price Correlation Between Strikes")
-    corr_matrix = df.pivot_table(
-        index="date_time", 
-        columns="instrument_name", 
-        values="mark_price_close"
-    ).corr()
 
-    fig_corr = px.imshow(
-        corr_matrix,
-        text_auto=True,
-        aspect="auto",
-        color_continuous_scale="RdBu",
-        origin="lower",
-        title="Mark Price Correlation Between Strikes"
-    )    
-    fig_corr.update_layout(height=800, width=1200)
-    st.plotly_chart(fig_corr, use_container_width=False)
-    
-    st.subheader("Mark Price Evolution by Strike (Heatmap)")
-    fig_mark_heatmap = px.density_heatmap(
-        df,
-        x="date_time", y="k", z="mark_price_close",
-        color_continuous_scale="Viridis",
-        title="Mark Price Evolution by Strike"
+    # NEW: VOLATILITY TRADING DECISION TOOL
+    st.subheader("Volatility Trading Decision Tool")
+    risk_tolerance = st.sidebar.selectbox(
+        "Risk Tolerance",
+        options=["Conservative", "Moderate", "Aggressive"],
+        index=1
     )
-    fig_mark_heatmap.update_layout(height=400, width=800)
-    st.plotly_chart(fig_mark_heatmap, use_container_width=True)
+    trade_decision = evaluate_trade_strategy(df, spot_price, risk_tolerance)
     
-    df = fetch_data(tuple(all_instruments))
-    if df.empty:
-        st.error("No data fetched from Thalex. Please check the API or instrument names.")
-        return
-
-    df_calls = df[df["option_type"] == "C"].copy().sort_values("date_time")
-    df_puts = df[df["option_type"] == "P"].copy().sort_values("date_time")
-
-    df_calls["gamma"] = df_calls.apply(lambda row: compute_gamma(row, spot_price), axis=1)
-    df_puts["gamma"] = df_puts.apply(lambda row: compute_gamma(row, spot_price), axis=1)
-
-    plot_gamma_heatmap(pd.concat([df_calls, df_puts]))
-
+    st.write("### Market and Volatility Metrics")
+    st.write(f"Implied Volatility (IV): {trade_decision['iv']:.2%}")
+    st.write(f"Realized Volatility (RV): {trade_decision['rv']:.2%}")
+    st.write(f"Volatility Direction: {trade_decision['vol_direction']}")
+    st.write(f"Market Regime: {trade_decision['market_regime']}")
+    st.write(f"Put/Call Open Interest Ratio: {trade_decision['put_call_ratio']:.2f}")
+    st.write(f"Average Call Delta: {trade_decision['avg_call_delta']:.4f}")
+    st.write(f"Average Put Delta: {trade_decision['avg_put_delta']:.4f}")
+    st.write(f"Average Call Gamma: {trade_decision['avg_call_gamma']:.4f}")
+    st.write(f"Average Put Gamma: {trade_decision['avg_put_gamma']:.4f}")
+    
+    st.write("### Trading Recommendation")
+    st.write(f"**Recommendation:** {trade_decision['recommendation']}")
+    st.write(f"**Position:** {trade_decision['position']}")
+    st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
+    
+    if st.button("Simulate Trade"):
+        st.write("Simulating trade based on recommendation...")
+        st.write("Position Size: Adjust based on capital (e.g., 1-5% of portfolio for chosen risk tolerance)")
+        st.write("Monitor price and volatility in real-time and adjust hedges dynamically.")
+    
+    # Existing gamma and GEX visualizations can be added below as desired.
+    # For example:
+    if not df_calls.empty and not df_puts.empty:
+        df_calls["gamma"] = df_calls.apply(lambda row: compute_gamma(row, spot_price), axis=1)
+        df_puts["gamma"] = df_puts.apply(lambda row: compute_gamma(row, spot_price), axis=1)
+        plot_gamma_heatmap(pd.concat([df_calls, df_puts]))
+    
+    # GEX analysis
     gex_data = []
     for instrument in all_instruments:
         ticker_data = fetch_ticker(instrument)
@@ -1049,13 +683,16 @@ def main():
         except Exception:
             continue
         option_type = instrument.split("-")[-1]
-        row = df_calls[df_calls["instrument_name"] == instrument].iloc[0] if option_type == "C" else df_puts[df_puts["instrument_name"] == instrument].iloc[0]
+        if option_type == "C":
+            row = df_calls[df_calls["instrument_name"] == instrument].iloc[0]
+        else:
+            row = df_puts[df_puts["instrument_name"] == instrument].iloc[0]
         gex = compute_gex(row, spot_price, oi)
         gex_data.append({"strike": strike, "gex": gex, "option_type": option_type})
     df_gex = pd.DataFrame(gex_data)
+    if not df_gex.empty:
+        plot_gex_by_strike(df_gex)
+        plot_net_gex(df_gex, spot_price)
 
-    plot_gex_by_strike(df_gex)
-    plot_net_gex(df_gex, spot_price)
-    
 if __name__ == '__main__':
     main()
