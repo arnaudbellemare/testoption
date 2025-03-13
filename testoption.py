@@ -441,17 +441,17 @@ def compute_historical_vrp(daily_iv, daily_rv):
 ###########################################
 # REALIZED VOLATILITY FUNCTION
 ###########################################
-def calculate_parkinson_volatility(price_data, window_days=7, annualize_days=365):
+def calculate_parkinson_volatility_fixed(price_data, period=30, annualize_days=365):
     """
-    Calculate Realized Volatility using Parkinson's High-Low Range Volatility method.
+    Calculate Realized Volatility using Parkinson's High-Low Range Volatility method for a fixed period.
     
     Args:
         price_data (pd.DataFrame): DataFrame with 'date_time', 'high', and 'low' columns.
-        window_days (int): Number of days for the rolling window (default: 7).
+        period (int): Fixed lookback period in days (default: 30, from [10, 20, 30, 60, 90, 120, 150, 180]).
         annualize_days (int): Number of days per year for annualization (default: 365 for crypto 24/7).
     
     Returns:
-        float: Annualized Parkinson volatility (as a percentage) or np.nan if data is empty.
+        float: Annualized Parkinson volatility (as a percentage) for the specified period, or np.nan if data is empty.
     """
     if price_data.empty:
         return np.nan
@@ -463,22 +463,28 @@ def calculate_parkinson_volatility(price_data, window_days=7, annualize_days=365
     if len(daily_data) < 1:
         return np.nan
     
-    # Calculate High/Low Returns (xtHL) for each day
-    daily_data['x_hl'] = np.log(daily_data['high'] / daily_data['low'])
+    # Sort by date_time and get the latest date
+    daily_data = daily_data.sort_index()
+    latest_date = daily_data.index[-1]
     
-    # Calculate Parkinson Number (HL_HV_daily)
-    n = len(daily_data)
-    if n == 0:
+    # Ensure we have enough data for the period
+    start_date = latest_date - pd.Timedelta(days=period - 1)
+    period_data = daily_data[start_date:latest_date]
+    
+    if len(period_data) < period:
         return np.nan
     
-    parkinson_sum = np.sum((daily_data['x_hl'] ** 2) / (4 * np.log(2)))
-    parkinson_vol = np.sqrt(parkinson_sum / n)
+    # Calculate High/Low Returns (xtHL) for each day in the period
+    period_data['x_hl'] = np.log(period_data['high'] / period_data['low'])
+    
+    # Calculate Parkinson Number (HL_HV_daily)
+    parkinson_sum = np.sum((period_data['x_hl'] ** 2) / (4 * np.log(2)))
+    parkinson_vol = np.sqrt(parkinson_sum / period)
     
     # Annualize the volatility (scale by sqrt of trading days per year)
-    # For crypto (24/7), use 365 days; adjust to 252 if needed for consistency with IV
     annualized_vol = parkinson_vol * np.sqrt(annualize_days)
     
-    return annualized_vol.iloc[-1] if not annualized_vol.empty else np.nan
+    return annualized_vol
 
 ###########################################
 # FUNCTION TO CALCULATE EXPECTED VALUE (EV) FOR ATM STRADDLE
@@ -514,16 +520,21 @@ def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv):
 # TRADE STRATEGY EVALUATION (USING PERCENTILES)
 ###########################################
 def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None,
-                            historical_vols=None, historical_vrps=None, days_to_expiration=7):
-    # Compute RV based on 7 days of data, then scale if expiration > 7 days
-    rv = calculate_realized_volatility(df_kraken)
-    if days_to_expiration > 7:
-        rv = rv * np.sqrt(days_to_expiration / 7)
+                           historical_vols=None, historical_vrps=None, days_to_expiration=7):
+    # Compute RV using Parkinson's method with fixed 30-day period (default)
+    rv = calculate_parkinson_volatility_fixed(df_kraken, period=30, annualize_days=365)
+    
+    if days_to_expiration > 30:  # Adjust for expiration if longer than 30 days
+        rv = rv * np.sqrt(days_to_expiration / 30)
+    elif days_to_expiration < 30:
+        # For shorter expirations, use a shorter period (e.g., 10 days)
+        rv = calculate_parkinson_volatility_fixed(df_kraken, period=10, annualize_days=365)
+    
     iv = df["iv_close"].mean() if not df.empty else np.nan
 
     # Add threshold check for IV/RV divergence (>20% difference)
     divergence = abs(iv - rv) / rv if rv != 0 else np.nan
-    if divergence > 0.20:
+    if not np.isnan(divergence) and divergence > 0.20:
         st.write(f"Alert: IV and RV diverge by {divergence*100:.2f}% (threshold: 20%).")
 
     vol_regime = classify_volatility_regime(rv, historical_vols) if historical_vols and len(historical_vols) > 0 else "Neutral"
@@ -596,7 +607,6 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
         "avg_call_gamma": avg_call_gamma,
         "avg_put_gamma": avg_put_gamma
     }
-
 ###########################################
 # MODIFIED MAIN DASHBOARD
 ###########################################
@@ -633,6 +643,13 @@ def main():
         return
     spot_price = df_kraken["close"].iloc[-1]
     st.write(f"Current BTC/USD Price: {spot_price:.2f}")
+    
+    # Add Parkinson period selection
+    parkinson_period = st.sidebar.selectbox(
+        "Select Parkinson Volatility Period (Days)",
+        options=[10, 20, 30, 60, 90, 120, 150, 180],
+        index=2  # Default to 30 days
+    )
     
     try:
         filtered_calls, filtered_puts = get_filtered_instruments(spot_price, expiry_str, T_YEARS, multiplier)
@@ -708,9 +725,9 @@ def main():
         index=1
     )
     trade_decision = evaluate_trade_strategy(df, spot_price, risk_tolerance, df_iv_agg_reset,
-                                               historical_vols=daily_rv,
-                                               historical_vrps=historical_vrps,
-                                               days_to_expiration=days_to_expiration)
+                                           historical_vols=daily_rv,
+                                           historical_vrps=historical_vrps,
+                                           days_to_expiration=days_to_expiration)
     
     st.write("### Market and Volatility Metrics")
     st.write(f"Implied Volatility (IV): {trade_decision['iv']:.2%}")
@@ -727,7 +744,7 @@ def main():
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
     
-    rv_overall = calculate_realized_volatility(df_kraken)
+    rv_overall = calculate_parkinson_volatility_fixed(df_kraken, period=parkinson_period, annualize_days=365)
     df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_overall)
     if df_ev is not None and not df_ev.empty:
         best_candidate = df_ev.loc[df_ev["EV"].idxmax()]
