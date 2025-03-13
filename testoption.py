@@ -441,13 +441,13 @@ def compute_historical_vrp(daily_iv, daily_rv):
 ###########################################
 # REALIZED VOLATILITY FUNCTION
 ###########################################
-def calculate_realized_volatility(price_data, window_days=7):
+def calculate_realized_volatility(price_data, window_days=7, annualize_days=365):
     if price_data.empty:
         return np.nan
     price_data = price_data.sort_values("date_time")
     log_returns = np.log(price_data["close"] / price_data["close"].shift(1))
-    daily_vol = log_returns.rolling(window=int(window_days * 24 * 12), min_periods=1).std()
-    annualized_vol = daily_vol * np.sqrt(365)
+    intraday_vol = log_returns.rolling(window=int(window_days * 24 * 12), min_periods=1).std()
+    annualized_vol = intraday_vol * np.sqrt(annualize_days)  # Default to 365, but allow flexibility
     return annualized_vol.iloc[-1] if not annualized_vol.empty else np.nan
 
 ###########################################
