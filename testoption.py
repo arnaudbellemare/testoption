@@ -567,10 +567,10 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
     Evaluate market conditions and recommend a volatility trading strategy.
     Uses IV, RV, delta, gamma, and historical percentile classifications for volatility and VRP.
     """
-  if not historical_vols:
+    if not historical_vols:
         # Fetch last 30 days of data if daily_rv is empty
-    df_kraken_30d = fetch_kraken_data(days=30)  # Modify fetch_kraken_data to accept days parameter
-    historical_vols = compute_daily_realized_volatility(df_kraken_30d)
+        df_kraken_30d = fetch_kraken_data(days=30)  # Modify fetch_kraken_data to accept days parameter
+        historical_vols = compute_daily_realized_volatility(df_kraken_30d)
                            
     rv = calculate_realized_volatility(df_kraken)
     iv = df["iv_close"].mean() if not df.empty else np.nan
