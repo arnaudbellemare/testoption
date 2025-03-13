@@ -451,16 +451,18 @@ def compare_volatility(iv, rv, threshold=0.1):
     else:
         return "Neutral"
 
-def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate"):
+def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None):
     """
     Evaluate market conditions and recommend a volatility trading strategy.
     Uses IV, RV, delta, gamma, and open interest to suggest long vol, short vol, or gamma scalping.
-    Assumes global variables df_kraken, df_iv_agg_reset, and ticker_list are available.
+    The df_iv_agg_reset parameter is required for market regime analysis.
     """
     rv = calculate_realized_volatility(df_kraken)
     iv = df["iv_close"].mean() if not df.empty else np.nan
     vol_direction = compare_volatility(iv, rv)
-    latest_regime = df_iv_agg_reset["market_regime"].iloc[-1] if "market_regime" in df_iv_agg_reset.columns and not df_iv_agg_reset.empty else "Neutral"
+    latest_regime = (df_iv_agg_reset["market_regime"].iloc[-1]
+                     if (df_iv_agg_reset is not None and "market_regime" in df_iv_agg_reset.columns and not df_iv_agg_reset.empty)
+                     else "Neutral")
     
     df_calls = df[df["option_type"] == "C"].copy()
     df_puts = df[df["option_type"] == "P"].copy()
@@ -591,7 +593,6 @@ def main():
     df_puts = df[df["option_type"] == "P"].copy().sort_values("date_time")
     
     # Compute aggregated IV for regime analysis
-# Compute aggregated IV for regime analysis
     df_iv_agg = (
         df.groupby("date_time", as_index=False)["iv_close"]
         .mean()
@@ -601,8 +602,7 @@ def main():
     df_iv_agg = df_iv_agg.set_index("date_time")
     df_iv_agg = df_iv_agg.resample("5T").mean().ffill()
 
-# Now compute the rolling mean on the datetime-indexed DataFrame
-# Instead of resetting the index, use date_time as the index:
+    # Compute the rolling mean on the datetime-indexed DataFrame
     df_iv_agg = df_iv_agg.sort_index()  # ensure it's sorted by date_time
     df_iv_agg["rolling_mean"] = df_iv_agg["iv_mean"].rolling("1D").mean()
 
@@ -610,14 +610,16 @@ def main():
         df_iv_agg["iv_mean"] > df_iv_agg["rolling_mean"], "Risk-Off", "Risk-On"
     )
 
-# Reset the index for later use if needed
+    # Reset the index for later use if needed
     df_iv_agg_reset = df_iv_agg.reset_index()
 
     # Create a simple market regime column for decision-making:
     df_iv_agg_reset = df_iv_agg.reset_index()  # date_time becomes a column now
     df_iv_agg_reset["rolling_mean"] = df_iv_agg_reset.rolling("1D", on="date_time")["iv_mean"].mean()
 
-    df_iv_agg_reset["market_regime"] = np.where(df_iv_agg_reset["iv_mean"] > df_iv_agg_reset["rolling_mean"], "Risk-Off", "Risk-On")
+    df_iv_agg_reset["market_regime"] = np.where(
+        df_iv_agg_reset["iv_mean"] > df_iv_agg_reset["rolling_mean"], "Risk-Off", "Risk-On"
+    )
     
     # Build ticker_list for open interest and delta analysis
     global ticker_list
@@ -657,7 +659,7 @@ def main():
         options=["Conservative", "Moderate", "Aggressive"],
         index=1
     )
-    trade_decision = evaluate_trade_strategy(df, spot_price, risk_tolerance)
+    trade_decision = evaluate_trade_strategy(df, spot_price, risk_tolerance, df_iv_agg_reset)
     
     st.write("### Market and Volatility Metrics")
     st.write(f"Implied Volatility (IV): {trade_decision['iv']:.2%}")
