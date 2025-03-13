@@ -717,6 +717,34 @@ def main():
     if not df_calls.empty and not df_puts.empty:
         df_calls["gamma"] = df_calls.apply(lambda row: compute_gamma(row, spot_price), axis=1)
         df_puts["gamma"] = df_puts.apply(lambda row: compute_gamma(row, spot_price), axis=1)
+    st.subheader("Volatility Smile at Latest Timestamp")
+    latest_ts = df["date_time"].max()
+    smile_df = df[df["date_time"] == latest_ts]
+    if not smile_df.empty:
+        atm_strike = smile_df.loc[smile_df["mark_price_close"].idxmax(), "k"]
+        smile_df = smile_df.sort_values(by="k")
+        fig_vol_smile = px.line(
+            smile_df,
+            x="k", y="iv_close",
+            markers=True,
+            title=f"Volatility Smile at {latest_ts.strftime('%d %b %H:%M')}",
+            labels={"iv_close": "IV", "k": "Strike"}
+        )
+        cheap_hedge_strike = smile_df.loc[smile_df["iv_close"].idxmin(), "k"]
+        fig_vol_smile.add_vline(
+            x=cheap_hedge_strike,
+            line=dict(dash="dash", color="green"),
+            annotation_text=f"Cheap Hedge ({cheap_hedge_strike})",
+            annotation_position="top"
+        )
+        fig_vol_smile.add_vline(
+            x=spot_price,
+            line=dict(dash="dash", color="blue"),
+            annotation_text=f"Price: {spot_price:.2f}",
+            annotation_position="bottom left"
+        )
+        fig_vol_smile.update_layout(height=400, width=600)
+        st.plotly_chart(fig_vol_smile, use_container_width=True)        
         plot_gamma_heatmap(pd.concat([df_calls, df_puts]))
     
     gex_data = []
