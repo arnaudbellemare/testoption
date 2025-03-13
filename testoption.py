@@ -264,7 +264,6 @@ def calculate_parkinson_volatility(price_data, window_days=7, annualize_days=365
     if price_data.empty or not {'high', 'low'}.issubset(price_data.columns):
         return np.nan
 
-    # Use "date_time" column if available, otherwise assume the index is datetime
     if "date_time" in price_data.columns:
         daily_data = price_data.resample('D', on='date_time').agg({
             'high': 'max',
@@ -279,18 +278,11 @@ def calculate_parkinson_volatility(price_data, window_days=7, annualize_days=365
     if len(daily_data) < window_days:
         return np.nan
 
-    # Calculate daily log high-low ratio
     daily_data['log_hl_ratio'] = np.log(daily_data['high'] / daily_data['low'])
-
-    # Calculate Parkinson variance components
     parkinson_var = daily_data['log_hl_ratio'].rolling(
         window=window_days, min_periods=1
     ).apply(lambda x: np.sum(x**2) / (4 * np.log(2) * window_days), raw=True)
-
-    # Annualize and convert to volatility
     annualized_vol = np.sqrt(parkinson_var * annualize_days)
-
-    # Reindex to match the original timestamps; if "date_time" is not in columns, align with the index
     if "date_time" in price_data.columns:
         return annualized_vol.reindex(price_data.index, method='ffill')
     else:
@@ -298,7 +290,6 @@ def calculate_parkinson_volatility(price_data, window_days=7, annualize_days=365
     
 def compute_daily_realized_volatility(df):
     """Calculate daily Parkinson volatility values."""
-    # Check if 'date_time' exists; if not, use the index for resampling
     if 'date_time' in df.columns:
         df_daily = df.resample('D', on='date_time').agg({
             'high': 'max',
@@ -309,7 +300,6 @@ def compute_daily_realized_volatility(df):
             'high': 'max',
             'low': 'min'
         }).dropna()
-
     daily_vols = []
     for i in range(1, len(df_daily) + 1):
         window = df_daily.iloc[max(0, i - 7):i]
@@ -317,9 +307,7 @@ def compute_daily_realized_volatility(df):
             continue
         vol = calculate_parkinson_volatility(window, window_days=len(window))
         daily_vols.append(vol.iloc[-1] if not vol.empty else np.nan)
-    
     return [v for v in daily_vols if not np.isnan(v)]
-
 
 def compute_daily_average_iv(df_iv_agg):
     daily_iv = df_iv_agg["iv_mean"].resample("D").mean(numeric_only=True).dropna().tolist()
@@ -497,39 +485,6 @@ def classify_vrp_regime(current_vrp, historical_vrps):
         return "Long Volatility"
     else:
         return "Neutral"
-def calculate_roger_satchell_volatility(price_data, window_days=7, annualize_days=365):
-    """
-    Calculate Realized Volatility using the Roger-Satchell estimator over a given window in days.
-    """
-    if price_data.empty or not set(['open', 'high', 'low', 'close']).issubset(price_data.columns):
-        return np.nan
-    
-    if "date_time" in price_data.columns:
-        daily_data = price_data.resample('D', on='date_time').agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last'
-        }).dropna()
-    else:
-        daily_data = price_data.resample('D').agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last'
-        }).dropna()
-    
-    if len(daily_data) < window_days:
-        return np.nan
-
-    daily_data = daily_data.iloc[-window_days:]
-    rs_squared = (
-        np.log(daily_data['high'] / daily_data['open']) * np.log(daily_data['high'] / daily_data['close']) +
-        np.log(daily_data['low'] / daily_data['open']) * np.log(daily_data['low'] / daily_data['close'])
-    )
-    daily_rs_vol = np.sqrt(rs_squared.mean())
-    annualized_vol = daily_rs_vol * np.sqrt(annualize_days)
-    return annualized_vol
 
 ###########################################
 # FUNCTION TO CALCULATE EXPECTED VALUE (EV) FOR ATM STRADDLE
@@ -566,11 +521,12 @@ def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv):
 ###########################################
 def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None,
                             historical_vols=None, historical_vrps=None, days_to_expiration=7):
-    # Corrected: call the properly defined function calculate_roger_satchell_volatility
-    rv_vol_series = calculate_roger_satchell_volatility(df_kraken, window_days=7)
+    # Compute realized volatility using Parkinson estimator over a 7-day window
+    rv_vol_series = calculate_parkinson_volatility(df_kraken, window_days=7)
     rv_vol = rv_vol_series.iloc[-1] if not rv_vol_series.empty else np.nan
     iv_vol = df["iv_close"].mean() if not df.empty else np.nan
 
+    # Convert to variance terms for VRP calculation
     rv_var = rv_vol ** 2 if not pd.isna(rv_vol) else np.nan
     iv_var = iv_vol ** 2 if not pd.isna(iv_vol) else np.nan
     current_vrp = iv_var - rv_var if (not pd.isna(iv_vol) and not pd.isna(rv_vol)) else np.nan
@@ -655,13 +611,10 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
 def main():
     login()  # Ensure user is logged in
     st.title("Crypto Options Visualization Dashboard (Plotly Version) with Volatility Trading Decisions")
-    
-    # Logout button
     if st.button("Logout"):
         st.session_state.logged_in = False
         st.stop()
     
-    # Set expiration date and other sidebar options
     current_date = dt.datetime.now()
     valid_days = get_valid_expiration_options(current_date)
     selected_day = st.sidebar.selectbox("Choose Expiration Day", options=valid_days)
@@ -681,7 +634,6 @@ def main():
     )
     multiplier = 1 if "1 Standard" in deviation_option else 2
 
-    # Fetch Kraken data (dual timeframe: 5m for real-time and 1d for volatility)
     global df_kraken
     df_kraken = fetch_kraken_data()
     if df_kraken.empty:
@@ -690,7 +642,6 @@ def main():
     spot_price = df_kraken["close"].iloc[-1]
     st.write(f"Current BTC/USD Price: {spot_price:.2f}")
     
-    # Fetch and filter instruments
     try:
         filtered_calls, filtered_puts = get_filtered_instruments(spot_price, expiry_str, T_YEARS, multiplier)
     except Exception as e:
@@ -699,8 +650,7 @@ def main():
     st.write("Filtered Call Instruments:", filtered_calls)
     st.write("Filtered Put Instruments:", filtered_puts)
     all_instruments = filtered_calls + filtered_puts
-
-    # Fetch options data from Thalex API
+    
     df = fetch_data(tuple(all_instruments))
     if df.empty:
         st.error("No data fetched from Thalex. Please check the API or instrument names.")
@@ -709,7 +659,6 @@ def main():
     df_calls = df[df["option_type"] == "C"].copy().sort_values("date_time")
     df_puts = df[df["option_type"] == "P"].copy().sort_values("date_time")
     
-    # Aggregate IV data for display
     df_iv_agg = (
         df.groupby("date_time", as_index=False)["iv_close"]
         .mean()
@@ -717,19 +666,20 @@ def main():
     )
     df_iv_agg["date_time"] = pd.to_datetime(df_iv_agg["date_time"])
     df_iv_agg = df_iv_agg.set_index("date_time")
-    df_iv_agg = df_iv_agg.resample("5T").mean().ffill().sort_index()
+    df_iv_agg = df_iv_agg.resample("5min").mean().ffill().sort_index()
     df_iv_agg["rolling_mean"] = df_iv_agg["iv_mean"].rolling("1D").mean()
     df_iv_agg["market_regime"] = np.where(
         df_iv_agg["iv_mean"] > df_iv_agg["rolling_mean"], "Risk-Off", "Risk-On"
     )
     df_iv_agg_reset = df_iv_agg.reset_index()
 
-    # Build ticker list for further analysis
     global ticker_list
     ticker_list = []
     for instrument in all_instruments:
         ticker_data = fetch_ticker(instrument)
-        if not (ticker_data and "open_interest" in ticker_data):
+        if ticker_data and "open_interest" in ticker_data:
+            oi = ticker_data["open_interest"]
+        else:
             continue
         try:
             strike = int(instrument.split("-")[2])
@@ -749,17 +699,15 @@ def main():
             "instrument": instrument,
             "strike": strike,
             "option_type": option_type,
-            "open_interest": ticker_data["open_interest"],
+            "open_interest": oi,
             "delta": delta_est,
             "iv": iv_val
         })
     
-    # Compute historical realized volatility and IV metrics
     daily_rv = compute_daily_realized_volatility(df_kraken)
     daily_iv = compute_daily_average_iv(df_iv_agg)
     historical_vrps = compute_historical_vrp(daily_iv, daily_rv)
     
-    # Evaluate trade strategy
     st.subheader("Volatility Trading Decision Tool")
     risk_tolerance = st.sidebar.selectbox(
         "Risk Tolerance",
@@ -786,10 +734,9 @@ def main():
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
     
-    # For EV calculations, extract a scalar from the volatility series
-    rv_series = calculate_roger_satchell_volatility(df_kraken, window_days=7, annualize_days=365)
-    rv_scalar = rv_series.iloc[-1] if (not rv_series.empty and not pd.isna(rv_series).any()) else np.nan
-    df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_scalar)
+    # Use Parkinson volatility for overall realized volatility
+    rv_overall = calculate_parkinson_volatility(df_kraken, window_days=7, annualize_days=365)
+    df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_overall)
     if df_ev is not None and not df_ev.empty and not df_ev["EV"].isna().all():
         df_ev_clean = df_ev.dropna(subset=["EV"])
         if not df_ev_clean.empty:
@@ -797,7 +744,7 @@ def main():
             best_strike = best_candidate["Strike"]
             st.subheader("ATM Straddle EV Analysis")
             st.write("Candidate Strikes and their Expected Value (EV) in $:")
-            st.dataframe(df_ev_clean.style.format({"Avg IV": "{:.2%}", "EV": "{:.2f}"}))
+            st.dataframe(df_ev_clean)  # EV table correctly shown
             st.write(f"Recommended ATM Strike based on highest EV: {best_strike}")
         else:
             st.write("No ATM candidates found with valid EV values.")
@@ -845,7 +792,9 @@ def main():
     gex_data = []
     for instrument in all_instruments:
         ticker_data = fetch_ticker(instrument)
-        if not (ticker_data and "open_interest" in ticker_data):
+        if ticker_data and "open_interest" in ticker_data:
+            oi = ticker_data["open_interest"]
+        else:
             continue
         try:
             strike = int(instrument.split("-")[2])
@@ -859,7 +808,7 @@ def main():
         if candidate.empty:
             continue
         row = candidate.iloc[0]
-        gex = compute_gex(row, spot_price, ticker_data["open_interest"])
+        gex = compute_gex(row, spot_price, oi)
         gex_data.append({"strike": strike, "gex": gex, "option_type": option_type})
     df_gex = pd.DataFrame(gex_data)
     if not df_gex.empty:
@@ -868,4 +817,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
