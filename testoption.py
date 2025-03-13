@@ -533,12 +533,11 @@ def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv):
 ###########################################
 def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None,
                             historical_vols=None, historical_vrps=None, days_to_expiration=7):
-    # Compute realized volatility using Parkinson estimator over a 7-day window
-    rv_vol_series = calculate_parkinson_volatility(df_kraken, window_days=7)
+    # Corrected: call the properly defined function calculate_roger_satchell_volatility
+    rv_vol_series = calculate_roger_satchell_volatility(df_kraken, window_days=7)
     rv_vol = rv_vol_series.iloc[-1] if not rv_vol_series.empty else np.nan
     iv_vol = df["iv_close"].mean() if not df.empty else np.nan
 
-    # Convert to variance terms for VRP calculation
     rv_var = rv_vol ** 2 if not pd.isna(rv_vol) else np.nan
     iv_var = iv_vol ** 2 if not pd.isna(iv_vol) else np.nan
     current_vrp = iv_var - rv_var if (not pd.isna(iv_vol) and not pd.isna(rv_vol)) else np.nan
@@ -756,8 +755,9 @@ def main():
     
     # For EV calculations, use a single scalar realized volatility
     rv_series = calculate_roger_satchell_volatility(df_kraken, window_days=7, annualize_days=365)
-    rv_scalar = rv_series.iloc[-1] if not pd.isna(rv_series).any() and not rv_series.empty else np.nan
+    rv_scalar = rv_series.iloc[-1] if (not rv_series.empty and not pd.isna(rv_series).any()) else np.nan
     df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_scalar)
+
     if df_ev is not None and not df_ev.empty and not df_ev["EV"].isna().all():
         df_ev_clean = df_ev.dropna(subset=["EV"])
         if not df_ev_clean.empty:
