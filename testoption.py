@@ -263,36 +263,42 @@ def calculate_parkinson_volatility(price_data, window_days=7, annualize_days=365
     """
     if price_data.empty or not {'high', 'low'}.issubset(price_data.columns):
         return np.nan
-    
-    # Resample to daily high/low prices while preserving 5m data
-    daily_data = price_data.resample('D', on='date_time').agg({
-        'high': 'max',
-        'low': 'min'
-    }).dropna()
-    
+
+    # Use "date_time" column if available, otherwise assume the index is datetime
+    if "date_time" in price_data.columns:
+        daily_data = price_data.resample('D', on='date_time').agg({
+            'high': 'max',
+            'low': 'min'
+        }).dropna()
+    else:
+        daily_data = price_data.resample('D').agg({
+            'high': 'max',
+            'low': 'min'
+        }).dropna()
+
     if len(daily_data) < window_days:
         return np.nan
-    
+
     # Calculate daily log high-low ratio
     daily_data['log_hl_ratio'] = np.log(daily_data['high'] / daily_data['low'])
-    
+
     # Calculate Parkinson variance components
     parkinson_var = daily_data['log_hl_ratio'].rolling(
         window=window_days, min_periods=1
     ).apply(lambda x: np.sum(x**2) / (4 * np.log(2) * window_days), raw=True)
-    
+
     # Annualize and convert to volatility
     annualized_vol = np.sqrt(parkinson_var * annualize_days)
-    
-    # Reindex to match original timestamps
-    return annualized_vol.reindex(price_data.index, method='ffill')
 
-###########################################
-# UPDATED HISTORICAL DATA UTILITIES
-###########################################
+    # Reindex to match the original timestamps; if "date_time" is not in columns, align with the index
+    if "date_time" in price_data.columns:
+        return annualized_vol.reindex(price_data.index, method='ffill')
+    else:
+        return annualized_vol.reindex(price_data.index, method='ffill')
+    
 def compute_daily_realized_volatility(df):
     """Calculate daily Parkinson volatility values."""
-    # Check if 'date_time' is a column; if not, assume the index is datetime
+    # Check if 'date_time' exists; if not, use the index for resampling
     if 'date_time' in df.columns:
         df_daily = df.resample('D', on='date_time').agg({
             'high': 'max',
@@ -303,7 +309,7 @@ def compute_daily_realized_volatility(df):
             'high': 'max',
             'low': 'min'
         }).dropna()
-    
+
     daily_vols = []
     for i in range(1, len(df_daily) + 1):
         window = df_daily.iloc[max(0, i - 7):i]
@@ -313,6 +319,7 @@ def compute_daily_realized_volatility(df):
         daily_vols.append(vol.iloc[-1] if not vol.empty else np.nan)
     
     return [v for v in daily_vols if not np.isnan(v)]
+
 
 def compute_daily_average_iv(df_iv_agg):
     daily_iv = df_iv_agg["iv_mean"].resample("D").mean(numeric_only=True).dropna().tolist()
