@@ -35,7 +35,7 @@ T_YEARS = days_to_expiry / 365  # Convert days to years
 
 def params(instrument_name):
     now = dt.datetime.now()
-    start_dt = now - dt.timedelta(days=7)
+    start_dt = now - dt.timedelta(days=30)
     return {
         "from": int(start_dt.timestamp()),
         "to": int(now.timestamp()),
@@ -227,7 +227,7 @@ def fetch_ticker(instrument_name):
 def fetch_kraken_data():
     kraken = ccxt.kraken()
     now_dt = dt.datetime.now()
-    start_dt = now_dt - dt.timedelta(days=180)
+    start_dt = now_dt - dt.timedelta(days=365)
     since = int(start_dt.timestamp() * 1000)
     ohlcv = kraken.fetch_ohlcv("BTC/USD", timeframe="5m", since=since, limit=3000)
     df_kraken = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -238,7 +238,7 @@ def fetch_kraken_data():
     df_kraken = df_kraken.sort_values(by="date_time").reset_index(drop=True)
 # Get the timezone from the first timestamp in the column
     tzinfo = df_kraken["date_time"].iloc[0].tzinfo
-    cutoff_start = (now_dt - dt.timedelta(days=180)).astimezone(tzinfo)
+    cutoff_start = (now_dt - dt.timedelta(days=30)).astimezone(tzinfo)
     df_kraken = df_kraken[df_kraken["date_time"] >= cutoff_start]
 
     return df_kraken
@@ -247,9 +247,39 @@ def fetch_kraken_data():
 # COMPUTE ROLLING VRP FUNCTION
 ###########################################
 def compute_rolling_vrp(group, window_str):
-    rolling_rv = group["log_return"].expanding(min_periods=1).apply(lambda x: np.nansum(x**2), raw=True)
-    rolling_iv = group["iv_close"].rolling(window_str, min_periods=1).apply(lambda x: np.mean(x**2), raw=True)
+    # Define a function to compute the Roger-Satchell variance for a single period.
+    def rs_variance(row):
+        try:
+            # Roger-Satchell formula:
+            # RS^2 = ln(High/Open) * ln(High/Close) + ln(Low/Open) * ln(Low/Close)
+            rs1 = np.log(row["mark_price_high"] / row["mark_price_open"])
+            rs2 = np.log(row["mark_price_high"] / row["mark_price_close"])
+            rs3 = np.log(row["mark_price_low"] / row["mark_price_open"])
+            rs4 = np.log(row["mark_price_low"] / row["mark_price_close"])
+            return rs1 * rs2 + rs3 * rs4
+        except Exception:
+            return np.nan
+
+    # Work on a copy to avoid modifying the original group DataFrame.
+    df = group.copy()
+    
+    # Compute RS variance for each row.
+    df["rs_variance"] = df.apply(rs_variance, axis=1)
+    
+    # Compute rolling realized variance using the RS variance.
+    # Here we sum the RS variances over the window; depending on your preference,
+    # you might average instead.
+    rolling_rv = df["rs_variance"].rolling(window_str, min_periods=1).sum()
+    
+    # Annualize the realized variance.
+    # The factor (365 / 7) assumes that window_str corresponds to a 7-day window.
+    # Adjust the factor if your window represents a different number of days.
     rolling_rv_annual = rolling_rv * (365 / 7)
+    
+    # Compute rolling implied variance from iv_close.
+    rolling_iv = df["iv_close"].rolling(window_str, min_periods=1).apply(lambda x: np.mean(x**2), raw=True)
+    
+    # The variance risk premium (VRP) is defined as implied variance minus realized variance.
     vrp = rolling_iv - rolling_rv_annual
     return vrp
 
@@ -444,46 +474,48 @@ def compute_historical_vrp(daily_iv, daily_rv):
 ###########################################
 # REALIZED VOLATILITY FUNCTION
 ###########################################
-def calculate_parkinson_volatility(price_data, window_days=1, annualize_days=365):
+def calculate_roger_satchell_volatility(price_data, window_days=30, annualize_days=365):
     """
-    Calculate Realized Volatility using Parkinson's High-Low Range Volatility method for a fixed period.
+    Calculate Realized Volatility using the Roger-Satchell estimator over a given window in days.
     
     Args:
-        price_data (pd.DataFrame): DataFrame with 'date_time', 'high', and 'low' columns.
-        window_days (int): Number of days for the period (default: 1 for daily volatility).
-        annualize_days (int): Number of days per year for annualization (default: 365 for crypto 24/7).
-    
+        price_data (pd.DataFrame): DataFrame with 'date_time', 'open', 'high', 'low', 'close' columns.
+        window_days (int): Number of days over which to compute the volatility.
+        annualize_days (int): Number of days per year for annualization.
+        
     Returns:
-        float: Annualized Parkinson volatility (as a percentage) or np.nan if data is empty/invalid.
+        float: Annualized Roger-Satchell volatility, or np.nan if data is insufficient.
     """
-    if price_data.empty or 'high' not in price_data.columns or 'low' not in price_data.columns:
+    # Check if the required columns are present
+    if price_data.empty or not set(['open', 'high', 'low', 'close']).issubset(price_data.columns):
         return np.nan
     
-    # Aggregate 5-minute data to daily highs and lows if not already daily
-    if price_data['date_time'].dt.freq != 'D':
-        daily_data = price_data.resample('D', on='date_time').agg({'high': 'max', 'low': 'min'})
-    else:
-        daily_data = price_data
+    # Resample the 5-minute data to daily OHLC bars
+    daily_data = price_data.resample('D', on='date_time').agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last'
+    }).dropna()
     
-    daily_data = daily_data.dropna()
-    
-    if len(daily_data) < 1:
-        return np.nan
-    
-    # Ensure we have enough data for the period (default window_days=1, so we use all available daily data)
+    # Ensure we have enough days of data
     if len(daily_data) < window_days:
         return np.nan
+
+    # Use the last `window_days` of data
+    daily_data = daily_data.iloc[-window_days:]
     
-    # Calculate High/Low Returns (xtHL) for each day in the period
-    daily_data['x_hl'] = np.log(daily_data['high'] / daily_data['low'])
+    # Calculate the Roger-Satchell volatility for each day:
+    rs_squared = (
+        np.log(daily_data['high'] / daily_data['open']) * np.log(daily_data['high'] / daily_data['close']) +
+        np.log(daily_data['low'] / daily_data['open']) * np.log(daily_data['low'] / daily_data['close'])
+    )
     
-    # Calculate Parkinson Number (HL_HV_daily) over the specified window
-    parkinson_sum = np.sum((daily_data['x_hl'] ** 2) / (4 * np.log(2)))
-    parkinson_vol = np.sqrt(parkinson_sum / window_days)
+    # Compute the mean daily RS variance and take the square root to get daily volatility
+    daily_rs_vol = np.sqrt(rs_squared.mean())
     
-    # Annualize the volatility (scale by sqrt of trading days per year)
-    annualized_vol = parkinson_vol * np.sqrt(annualize_days)
-    
+    # Annualize the daily volatility
+    annualized_vol = daily_rs_vol * np.sqrt(annualize_days)
     return annualized_vol
 
 ###########################################
@@ -520,15 +552,17 @@ def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv):
 # TRADE STRATEGY EVALUATION (USING PERCENTILES)
 ###########################################
 def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None,
-                           historical_vols=None, historical_vrps=None, days_to_expiration=7):
+                           historical_vols=None, historical_vrps=None, days_to_expiration=30):
     # Compute RV using Parkinson's method with fixed 30-day period (default)
-    rv = calculate_parkinson_volatility(df_kraken, window_days=30, annualize_days=365)
+    rv = rv = calculate_roger_satchell_volatility(df_kraken, window_days=30, annualize_days=365)
+
     
     if days_to_expiration > 30:  # Adjust for expiration if longer than 30 days
         rv = rv * np.sqrt(days_to_expiration / 30)
     elif days_to_expiration < 30:
         # For shorter expirations, use a shorter period (e.g., 10 days)
-        rv = calculate_parkinson_volatility(df_kraken, window_days=30, annualize_days=365)
+        rv = calculate_roger_satchell_volatility(df_kraken, window_days=30, annualize_days=365)
+
     
     iv = df["iv_close"].mean() if not df.empty else np.nan
 
@@ -644,12 +678,6 @@ def main():
     spot_price = df_kraken["close"].iloc[-1]
     st.write(f"Current BTC/USD Price: {spot_price:.2f}")
     
-    # Add Parkinson period selection
-    parkinson_period = st.sidebar.selectbox(
-        "Select Parkinson Volatility Period (Days)",
-        options=[10, 20, 30, 60, 90, 120, 150, 180],
-        index=2  # Default to 30 days
-    )
     
     try:
         filtered_calls, filtered_puts = get_filtered_instruments(spot_price, expiry_str, T_YEARS, multiplier)
@@ -744,7 +772,7 @@ def main():
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
     
-    rv_overall = calculate_parkinson_volatility(df_kraken, window_days=30, annualize_days=365)
+    rv_overall = calculate_roger_satchell_volatility(df_kraken, window_days=30, annualize_days=365)
     df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_overall)
     if df_ev is not None and not df_ev.empty:
         best_candidate = df_ev.loc[df_ev["EV"].idxmax()]
