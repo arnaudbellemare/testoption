@@ -7,7 +7,7 @@ import ccxt
 from toolz.curried import *
 import plotly.express as px
 import plotly.graph_objects as go
-from scipy.stats import norm
+from scipy.stats import norm, percentileofscore
 import math
 
 # -------------------------------
@@ -165,20 +165,37 @@ def get_actual_iv(instrument_name):
 def get_filtered_instruments(spot_price, expiry_str=DEFAULT_EXPIRY_STR, t_years=T_YEARS, multiplier=1):
     """
     Filter instruments based on the theoretical range derived from a standard deviation move.
+    Raises an exception if no valid instruments are found.
     """
     instruments_list = fetch_instruments()
+    
+    # Use the user-selected expiry for filtering
     calls_all = get_option_instruments(instruments_list, "C", expiry_str)
     puts_all = get_option_instruments(instruments_list, "P", expiry_str)
     
-    strike_list = [(inst, int(inst.split("-")[2])) for inst in calls_all]
+    if not calls_all:
+        raise Exception(f"No call instruments found for expiry {expiry_str}.")
+    
+    strike_list = []
+    for inst in calls_all:
+        parts = inst.split("-")
+        if len(parts) >= 3 and parts[2].isdigit():
+            strike_list.append((inst, int(parts[2])))
+    
+    if not strike_list:
+        raise Exception(f"No valid call instruments with strikes found for expiry {expiry_str}.")
+    
     strike_list.sort(key=lambda x: x[1])
     strikes = [s for _, s in strike_list]
+    if not strikes:
+        raise Exception("No strikes available for filtering.")
+    
     closest_index = min(range(len(strikes)), key=lambda i: abs(strikes[i] - spot_price))
     nearest_instrument = strike_list[closest_index][0]
     
     actual_iv = get_actual_iv(nearest_instrument)
     if actual_iv is None:
-        raise Exception("Could not fetch actual IV for the nearest instrument")
+        raise Exception("Could not fetch actual IV for the nearest instrument.")
     
     lower_bound = spot_price * np.exp(-actual_iv * np.sqrt(t_years) * multiplier)
     upper_bound = spot_price * np.exp(actual_iv * np.sqrt(t_years) * multiplier)
@@ -188,6 +205,10 @@ def get_filtered_instruments(spot_price, expiry_str=DEFAULT_EXPIRY_STR, t_years=
     
     filtered_calls.sort(key=lambda x: int(x.split("-")[2]))
     filtered_puts.sort(key=lambda x: int(x.split("-")[2]))
+    
+    if not filtered_calls and not filtered_puts:
+        raise Exception("No instruments left after applying the theoretical range filter.")
+    
     return filtered_calls, filtered_puts
 
 ###########################################
@@ -260,7 +281,7 @@ def compute_rolling_vrp(group, window_str):
     """
     rolling_rv = group["log_return"].expanding(min_periods=1).apply(lambda x: np.nansum(x**2), raw=True)
     rolling_iv = group["iv_close"].rolling(window_str, min_periods=1).apply(lambda x: np.mean(x**2), raw=True)
-    rolling_rv_annual = rolling_rv * (365 / 7)  # Annualize 7-day realized volatility
+    rolling_rv_annual = rolling_rv * (365 / 7)
     vrp = rolling_iv - rolling_rv_annual
     return vrp
 
@@ -429,7 +450,68 @@ def plot_net_gex(df_gex, spot_price):
     st.plotly_chart(fig_net_gex, use_container_width=True)
 
 ###########################################
-# NEW HELPER FUNCTIONS FOR DECISION-MAKING
+# PERCENTILE-BASED RISK CLASSIFICATIONS
+###########################################
+def classify_volatility_regime(current_vol, historical_vols):
+    """
+    Classify volatility regime based on the percentile rank of current volatility.
+    Returns: 'Low Volatility', 'Medium Volatility', or 'High Volatility'
+    """
+    percentile = percentileofscore(historical_vols, current_vol)
+    if percentile < 5:
+        return "Low Volatility"
+    elif percentile > 95:
+        return "High Volatility"
+    else:
+        return "Medium Volatility"
+
+def classify_vrp_regime(current_vrp, historical_vrps):
+    """
+    Classify the VRP regime based on its historical percentile.
+    Returns a suggestion for positioning: 'Long Volatility', 'Short Volatility', or 'Neutral'
+    """
+    percentile = percentileofscore(historical_vrps, current_vrp)
+    if current_vrp < 0:
+        return "Long Volatility"
+    elif percentile > 75:
+        return "Short Volatility"
+    elif percentile < 25:
+        return "Long Volatility"
+    else:
+        return "Neutral"
+
+###########################################
+# HISTORICAL DATA UTILITIES
+###########################################
+def compute_daily_realized_volatility(df):
+    """
+    Compute realized volatility for each day from df (df_kraken).
+    Returns a list of daily realized volatility values.
+    """
+    daily_vols = []
+    df['date'] = df['date_time'].dt.date
+    for date, group in df.groupby('date'):
+        vol = calculate_realized_volatility(group, window_days=1)
+        if not np.isnan(vol):
+            daily_vols.append(vol)
+    return daily_vols
+
+def compute_daily_average_iv(df_iv_agg):
+    """
+    Compute daily average IV from the iv_mean column in df_iv_agg.
+    """
+    daily_iv = df_iv_agg.resample("D").mean()["iv_mean"].dropna().tolist()
+    return daily_iv
+
+def compute_historical_vrp(daily_iv, daily_rv):
+    """
+    Compute historical VRP values from daily IV and daily realized volatility.
+    """
+    n = min(len(daily_iv), len(daily_rv))
+    return [daily_iv[i] - daily_rv[i] for i in range(n)]
+
+###########################################
+# REALIZED VOLATILITY FUNCTION
 ###########################################
 def calculate_realized_volatility(price_data, window_days=7):
     """
@@ -441,52 +523,42 @@ def calculate_realized_volatility(price_data, window_days=7):
     price_data = price_data.sort_values("date_time")
     log_returns = np.log(price_data["close"] / price_data["close"].shift(1))
     daily_vol = log_returns.rolling(window=int(window_days * 24 * 12), min_periods=1).std()  # ~336 intervals/day
-    annualized_vol = daily_vol * np.sqrt(365)  # 365 days for crypto
+    annualized_vol = daily_vol * np.sqrt(365)
     return annualized_vol.iloc[-1] if not annualized_vol.empty else np.nan
 
-def compare_volatility(iv, rv, threshold):
-    """
-    Compare implied volatility (IV) to realized volatility (RV) using a dynamic threshold.
-    Returns "Vol Up" if IV < RV - threshold, "Vol Down" if IV > RV + threshold, "Neutral" otherwise.
-    """
-    if pd.isna(iv) or pd.isna(rv):
-        return "Neutral"
-    if iv < rv - threshold:
-        return "Vol Up"
-    elif iv > rv + threshold:
-        return "Vol Down"
-    else:
-        return "Neutral"
-
-def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None, threshold=0.1):
+###########################################
+# TRADE STRATEGY EVALUATION (USING PERCENTILES)
+###########################################
+def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None,
+                            historical_vols=None, historical_vrps=None):
     """
     Evaluate market conditions and recommend a volatility trading strategy.
-    Uses IV, RV, delta, gamma, and open interest to suggest long vol, short vol, or gamma scalping.
-    The df_iv_agg_reset parameter is required for market regime analysis.
+    Uses IV, RV, delta, gamma, and historical percentile classifications for volatility and VRP.
     """
     rv = calculate_realized_volatility(df_kraken)
     iv = df["iv_close"].mean() if not df.empty else np.nan
-    vol_direction = compare_volatility(iv, rv, threshold)
-    latest_regime = (df_iv_agg_reset["market_regime"].iloc[-1]
-                     if (df_iv_agg_reset is not None and "market_regime" in df_iv_agg_reset.columns and not df_iv_agg_reset.empty)
-                     else "Neutral")
+
+    # Classify current volatility regime using historical realized volatility
+    vol_regime = classify_volatility_regime(rv, historical_vols) if historical_vols and len(historical_vols) > 0 else "Neutral"
     
-    # Use open-interest–weighted averages for delta calculations
+    # Compute current VRP and classify its regime
+    current_vrp = iv - rv
+    vrp_regime = classify_vrp_regime(current_vrp, historical_vrps) if historical_vrps and len(historical_vrps) > 0 else "Neutral"
+
+    # Open-interest–weighted delta calculations
     call_items = [item for item in ticker_list if item["option_type"] == "C"]
     put_items = [item for item in ticker_list if item["option_type"] == "P"]
     call_oi_total = sum(item["open_interest"] for item in call_items)
     put_oi_total = sum(item["open_interest"] for item in put_items)
-    
     avg_call_delta = (sum(item["delta"] * item["open_interest"] for item in call_items) / call_oi_total) if call_oi_total > 0 else 0
     avg_put_delta = (sum(item["delta"] * item["open_interest"] for item in put_items) / put_oi_total) if put_oi_total > 0 else 0
 
     df_ticker = pd.DataFrame(ticker_list) if ticker_list else pd.DataFrame()
-    total_oi = df_ticker["open_interest"].sum() if not df_ticker.empty else 0
     call_oi = df_ticker[df_ticker["option_type"] == "C"]["open_interest"].sum() if not df_ticker.empty else 0
     put_oi = df_ticker[df_ticker["option_type"] == "P"]["open_interest"].sum() if not df_ticker.empty else 0
     put_call_ratio = put_oi / call_oi if call_oi > 0 else np.inf
 
-    # (Optionally, gamma metrics can be weighted similarly if desired)
+    # Gamma metrics
     df_calls = df[df["option_type"] == "C"].copy()
     df_puts = df[df["option_type"] == "P"].copy()
     if "gamma" not in df_calls.columns:
@@ -495,46 +567,47 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
         df_puts["gamma"] = df_puts.apply(lambda row: compute_gamma(row, spot_price), axis=1)
     avg_call_gamma = df_calls["gamma"].mean() if not df_calls.empty else 0
     avg_put_gamma = df_puts["gamma"].mean() if not df_puts.empty else 0
-    
-    recommendation = "Neutral"
-    position = None
-    hedge_action = None
-    
-    if risk_tolerance == "Aggressive":
-        if vol_direction == "Vol Up" or latest_regime == "Risk-Off":
-            recommendation = "Long Volatility"
-            position = "Buy Straddle/Strangle (Calls & Puts)"
-            hedge_action = "Delta hedge by selling BTC futures"
-        elif vol_direction == "Vol Down" or latest_regime == "Risk-On":
-            recommendation = "Short Volatility"
-            position = "Sell Straddle/Spread (Calls & Puts)"
-            hedge_action = "Monitor for volatility spikes; prepare to buy back if IV rises"
-        else:
-            recommendation = "Gamma Scalping"
-            position = "Buy ATM Straddle, maintain Delta-neutral"
-            hedge_action = "Dynamically hedge using BTC futures"
-    else:  # Moderate or Conservative
-        if vol_direction == "Vol Up" and put_call_ratio > 1 and latest_regime == "Risk-Off":
-            recommendation = "Long Volatility (Conservative)"
-            position = "Buy OTM Puts"
-            hedge_action = "Limit position size; hedge lightly with BTC futures short"
-        elif vol_direction == "Vol Down" and put_call_ratio < 1 and latest_regime == "Risk-On":
-            recommendation = "Short Volatility (Conservative)"
-            position = "Sell OTM Calls"
-            hedge_action = "Limit exposure; hedge with small BTC futures long"
-        else:
-            recommendation = "Gamma Scalping (Conservative)"
-            position = "Buy small ATM Straddle"
-            hedge_action = "Light delta hedging and monitor closely"
-    
+
+    # Risk profile–specific decision logic based on percentile classifications
+    if vrp_regime == "Long Volatility":
+        if risk_tolerance == "Conservative":
+            recommendation = "Long Volatility (Conservative): Buy limited OTM Puts"
+            position = "Limited OTM Puts"
+            hedge_action = "Hedge lightly with BTC futures short"
+        elif risk_tolerance == "Moderate":
+            recommendation = "Long Volatility (Neutral): Consider delta-hedged straddles"
+            position = "ATM Straddle"
+            hedge_action = "Implement dynamic delta hedging"
+        else:  # Aggressive
+            recommendation = "Long Volatility (Aggressive): Take leveraged long volatility positions"
+            position = "Leveraged Long Straddle"
+            hedge_action = "Aggressively hedge using BTC futures"
+    elif vrp_regime == "Short Volatility":
+        if risk_tolerance == "Conservative":
+            recommendation = "Short Volatility (Conservative): Sell a small number of call spreads"
+            position = "Call Spread"
+            hedge_action = "Hedge by buying BTC futures"
+        elif risk_tolerance == "Moderate":
+            recommendation = "Short Volatility (Neutral): Sell strangles with tight stops"
+            position = "Strangle"
+            hedge_action = "Monitor and adjust hedge dynamically"
+        else:  # Aggressive
+            recommendation = "Short Volatility (Aggressive): Consider naked call selling"
+            position = "Naked Calls"
+            hedge_action = "Aggressively hedge with BTC futures"
+    else:
+        recommendation = "Gamma Scalping (Neutral): Consider buying small ATM straddles"
+        position = "Small ATM Straddle"
+        hedge_action = "Implement light delta hedging"
+
     return {
         "recommendation": recommendation,
         "position": position,
         "hedge_action": hedge_action,
         "iv": iv,
         "rv": rv,
-        "vol_direction": vol_direction,
-        "market_regime": latest_regime,
+        "vol_regime": vol_regime,
+        "vrp_regime": vrp_regime,
         "put_call_ratio": put_call_ratio,
         "avg_call_delta": avg_call_delta,
         "avg_put_delta": avg_put_delta,
@@ -576,9 +649,6 @@ def main():
     )
     multiplier = 1 if "1 Standard" in deviation_option else 2
 
-    # Dynamic Volatility Threshold for decision making
-    threshold = st.sidebar.slider("Volatility Threshold (%)", 1.0, 20.0, 10.0) / 100
-
     # Fetch Kraken data
     global df_kraken
     df_kraken = fetch_kraken_data()
@@ -614,14 +684,14 @@ def main():
     df_iv_agg["date_time"] = pd.to_datetime(df_iv_agg["date_time"])
     df_iv_agg = df_iv_agg.set_index("date_time")
     df_iv_agg = df_iv_agg.resample("5T").mean().ffill()
-    df_iv_agg = df_iv_agg.sort_index()  # ensure it's sorted by date_time
+    df_iv_agg = df_iv_agg.sort_index()
     df_iv_agg["rolling_mean"] = df_iv_agg["iv_mean"].rolling("1D").mean()
     df_iv_agg["market_regime"] = np.where(
         df_iv_agg["iv_mean"] > df_iv_agg["rolling_mean"], "Risk-Off", "Risk-On"
     )
     df_iv_agg_reset = df_iv_agg.reset_index()
 
-    # Build ticker_list for open interest and delta analysis, using T_YEARS for proper delta calculation
+    # Build ticker_list for open interest and delta analysis using T_YEARS for proper delta calculation
     global ticker_list
     ticker_list = []
     for instrument in all_instruments:
@@ -638,7 +708,6 @@ def main():
         iv_val = ticker_data.get("iv", None)
         if iv_val is None:
             continue
-        # Use computed T_YEARS rather than a hardcoded T_est
         T = T_YEARS
         try:
             d1 = (np.log(spot_price / strike) + 0.5 * iv_val**2 * T) / (iv_val * np.sqrt(T))
@@ -653,20 +722,27 @@ def main():
             "delta": delta_est
         })
     
-    # NEW: VOLATILITY TRADING DECISION TOOL
+    # Compute historical daily realized volatility and daily average IV
+    daily_rv = compute_daily_realized_volatility(df_kraken)
+    daily_iv = compute_daily_average_iv(df_iv_agg)
+    historical_vrps = compute_historical_vrp(daily_iv, daily_rv)
+    
+    # NEW: VOLATILITY TRADING DECISION TOOL using percentile-based risk classification
     st.subheader("Volatility Trading Decision Tool")
     risk_tolerance = st.sidebar.selectbox(
         "Risk Tolerance",
         options=["Conservative", "Moderate", "Aggressive"],
         index=1
     )
-    trade_decision = evaluate_trade_strategy(df, spot_price, risk_tolerance, df_iv_agg_reset, threshold)
+    trade_decision = evaluate_trade_strategy(df, spot_price, risk_tolerance, df_iv_agg_reset,
+                                               historical_vols=daily_rv,
+                                               historical_vrps=historical_vrps)
     
     st.write("### Market and Volatility Metrics")
     st.write(f"Implied Volatility (IV): {trade_decision['iv']:.2%}")
     st.write(f"Realized Volatility (RV): {trade_decision['rv']:.2%}")
-    st.write(f"Volatility Direction: {trade_decision['vol_direction']}")
-    st.write(f"Market Regime: {trade_decision['market_regime']}")
+    st.write(f"Volatility Regime: {trade_decision['vol_regime']}")
+    st.write(f"VRP Regime: {trade_decision['vrp_regime']}")
     st.write(f"Put/Call Open Interest Ratio: {trade_decision['put_call_ratio']:.2f}")
     st.write(f"Average Call Delta: {trade_decision['avg_call_delta']:.4f}")
     st.write(f"Average Put Delta: {trade_decision['avg_put_delta']:.4f}")
