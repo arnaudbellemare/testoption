@@ -61,10 +61,10 @@ COLUMNS = [
 ###########################################
 def get_valid_expiration_options(current_date):
     """
-    Returns a list of valid expiration dates (as strings) for demonstration.
+    Returns a list of valid expiration dates (as strings) using only 14 and 28 days from now.
     """
     options = []
-    for days in [7, 14, 21]:
+    for days in [14, 28]:
         exp_date = current_date + dt.timedelta(days=days)
         options.append(exp_date.strftime("%d%b%y").upper())
     return options
@@ -427,8 +427,7 @@ def plot_net_gex(df_gex, spot_price):
 def calculate_realized_volatility(price_data, window_days=7):
     """
     Calculate realized volatility (annualized) from price data over a specified window.
-    Uses log returns and annualizes by sqrt(252) trading days.
-    Note: Uses the "close" column from Kraken data.
+    Uses log returns from the "close" column and annualizes by sqrt(252) trading days.
     """
     if price_data.empty:
         return np.nan
@@ -461,7 +460,7 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate"):
     rv = calculate_realized_volatility(df_kraken)
     iv = df["iv_close"].mean() if not df.empty else np.nan
     vol_direction = compare_volatility(iv, rv)
-    latest_regime = df_iv_agg_reset["market_regime"].iloc[-1] if not df_iv_agg_reset.empty else "Neutral"
+    latest_regime = df_iv_agg_reset["market_regime"].iloc[-1] if "market_regime" in df_iv_agg_reset.columns and not df_iv_agg_reset.empty else "Neutral"
     
     df_calls = df[df["option_type"] == "C"].copy()
     df_puts = df[df["option_type"] == "P"].copy()
@@ -603,7 +602,11 @@ def main():
     df_iv_agg = df_iv_agg.resample("5T").mean().ffill()
     global df_iv_agg_reset
     df_iv_agg_reset = df_iv_agg.reset_index()
-
+    # For the purpose of decision-making, we need a "market_regime" column.
+    # Here, we use a simple rule: if the aggregated IV is above its rolling mean, we call it "Risk-Off", otherwise "Risk-On".
+    df_iv_agg_reset["rolling_mean"] = df_iv_agg_reset["iv_mean"].rolling("1D", min_periods=1).mean()
+    df_iv_agg_reset["market_regime"] = np.where(df_iv_agg_reset["iv_mean"] > df_iv_agg_reset["rolling_mean"], "Risk-Off", "Risk-On")
+    
     # Build ticker_list for open interest and delta analysis
     global ticker_list
     ticker_list = []
