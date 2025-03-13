@@ -227,7 +227,7 @@ def fetch_ticker(instrument_name):
 def fetch_kraken_data():
     kraken = ccxt.kraken()
     now_dt = dt.datetime.now()
-    start_dt = now_dt - dt.timedelta(days=7)
+    start_dt = now_dt - dt.timedelta(days=180)
     since = int(start_dt.timestamp() * 1000)
     ohlcv = kraken.fetch_ohlcv("BTC/USD", timeframe="5m", since=since, limit=3000)
     df_kraken = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
