@@ -534,7 +534,8 @@ def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv):
 def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None,
                             historical_vols=None, historical_vrps=None, days_to_expiration=7):
     # Compute realized volatility using Parkinson estimator over a 7-day window
-    rv_vol = calculate_parkinson_volatility(df_kraken, window_days=7)
+    rv_vol_series = calculate_parkinson_volatility(df_kraken, window_days=7)
+    rv_vol = rv_vol_series.iloc[-1] if not rv_vol_series.empty else np.nan
     iv_vol = df["iv_close"].mean() if not df.empty else np.nan
 
     # Convert to variance terms for VRP calculation
