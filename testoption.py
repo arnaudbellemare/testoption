@@ -35,7 +35,7 @@ T_YEARS = days_to_expiry / 365  # Convert days to years
 
 def params(instrument_name):
     now = dt.datetime.now()
-    start_dt = now - dt.timedelta(days=30)
+    start_dt = now - dt.timedelta(days=7)
     return {
         "from": int(start_dt.timestamp()),
         "to": int(now.timestamp()),
@@ -238,7 +238,7 @@ def fetch_kraken_data():
     df_kraken = df_kraken.sort_values(by="date_time").reset_index(drop=True)
 # Get the timezone from the first timestamp in the column
     tzinfo = df_kraken["date_time"].iloc[0].tzinfo
-    cutoff_start = (now_dt - dt.timedelta(days=30)).astimezone(tzinfo)
+    cutoff_start = (now_dt - dt.timedelta(days=7)).astimezone(tzinfo)
     df_kraken = df_kraken[df_kraken["date_time"] >= cutoff_start]
 
     return df_kraken
@@ -474,7 +474,7 @@ def compute_historical_vrp(daily_iv, daily_rv):
 ###########################################
 # REALIZED VOLATILITY FUNCTION
 ###########################################
-def calculate_roger_satchell_volatility(price_data, window_days=30, annualize_days=365):
+def calculate_roger_satchell_volatility(price_data, window_days=7, annualize_days=365):
     """
     Calculate Realized Volatility using the Roger-Satchell estimator over a given window in days.
     
@@ -552,17 +552,9 @@ def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv):
 # TRADE STRATEGY EVALUATION (USING PERCENTILES)
 ###########################################
 def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None,
-                           historical_vols=None, historical_vrps=None, days_to_expiration=30):
+                           historical_vols=None, historical_vrps=None, days_to_expiration=7):
     # Compute RV using Parkinson's method with fixed 30-day period (default)
-    rv = rv = calculate_roger_satchell_volatility(df_kraken, window_days=30, annualize_days=365)
-
-    
-    if days_to_expiration > 30:  # Adjust for expiration if longer than 30 days
-        rv = rv * np.sqrt(days_to_expiration / 30)
-    elif days_to_expiration < 30:
-        # For shorter expirations, use a shorter period (e.g., 10 days)
-        rv = calculate_roger_satchell_volatility(df_kraken, window_days=30, annualize_days=365)
-
+    rv = calculate_roger_satchell_volatility(df_kraken, window_days=7, annualize_days=365)
     
     iv = df["iv_close"].mean() if not df.empty else np.nan
 
@@ -772,7 +764,7 @@ def main():
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
     
-    rv_overall = calculate_roger_satchell_volatility(df_kraken, window_days=30, annualize_days=365)
+    rv_overall = calculate_roger_satchell_volatility(df_kraken, window_days=7, annualize_days=365)
     df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_overall)
     if df_ev is not None and not df_ev.empty:
         best_candidate = df_ev.loc[df_ev["EV"].idxmax()]
