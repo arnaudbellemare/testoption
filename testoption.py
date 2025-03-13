@@ -441,13 +441,43 @@ def compute_historical_vrp(daily_iv, daily_rv):
 ###########################################
 # REALIZED VOLATILITY FUNCTION
 ###########################################
-def calculate_realized_volatility(price_data, window_days=7, annualize_days=365):
+def calculate_parkinson_volatility(price_data, window_days=7, annualize_days=365):
+    """
+    Calculate Realized Volatility using Parkinson's High-Low Range Volatility method.
+    
+    Args:
+        price_data (pd.DataFrame): DataFrame with 'date_time', 'high', and 'low' columns.
+        window_days (int): Number of days for the rolling window (default: 7).
+        annualize_days (int): Number of days per year for annualization (default: 365 for crypto 24/7).
+    
+    Returns:
+        float: Annualized Parkinson volatility (as a percentage) or np.nan if data is empty.
+    """
     if price_data.empty:
         return np.nan
-    price_data = price_data.sort_values("date_time")
-    log_returns = np.log(price_data["close"] / price_data["close"].shift(1))
-    intraday_vol = log_returns.rolling(window=int(window_days * 24 * 12), min_periods=1).std()
-    annualized_vol = intraday_vol * np.sqrt(annualize_days)  # Default to 365, but allow flexibility
+    
+    # Aggregate 5-minute data to daily highs and lows
+    daily_data = price_data.resample('D', on='date_time').agg({'high': 'max', 'low': 'min'})
+    daily_data = daily_data.dropna()
+    
+    if len(daily_data) < 1:
+        return np.nan
+    
+    # Calculate High/Low Returns (xtHL) for each day
+    daily_data['x_hl'] = np.log(daily_data['high'] / daily_data['low'])
+    
+    # Calculate Parkinson Number (HL_HV_daily)
+    n = len(daily_data)
+    if n == 0:
+        return np.nan
+    
+    parkinson_sum = np.sum((daily_data['x_hl'] ** 2) / (4 * np.log(2)))
+    parkinson_vol = np.sqrt(parkinson_sum / n)
+    
+    # Annualize the volatility (scale by sqrt of trading days per year)
+    # For crypto (24/7), use 365 days; adjust to 252 if needed for consistency with IV
+    annualized_vol = parkinson_vol * np.sqrt(annualize_days)
+    
     return annualized_vol.iloc[-1] if not annualized_vol.empty else np.nan
 
 ###########################################
