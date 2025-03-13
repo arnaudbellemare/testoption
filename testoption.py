@@ -441,45 +441,42 @@ def compute_historical_vrp(daily_iv, daily_rv):
 ###########################################
 # REALIZED VOLATILITY FUNCTION
 ###########################################
-def calculate_parkinson_volatility_fixed(price_data, period=30, annualize_days=365):
+def calculate_parkinson_volatility(price_data, window_days=1, annualize_days=365):
     """
     Calculate Realized Volatility using Parkinson's High-Low Range Volatility method for a fixed period.
     
     Args:
         price_data (pd.DataFrame): DataFrame with 'date_time', 'high', and 'low' columns.
-        period (int): Fixed lookback period in days (default: 30, from [10, 20, 30, 60, 90, 120, 150, 180]).
+        window_days (int): Number of days for the period (default: 1 for daily volatility).
         annualize_days (int): Number of days per year for annualization (default: 365 for crypto 24/7).
     
     Returns:
-        float: Annualized Parkinson volatility (as a percentage) for the specified period, or np.nan if data is empty.
+        float: Annualized Parkinson volatility (as a percentage) or np.nan if data is empty/invalid.
     """
-    if price_data.empty:
+    if price_data.empty or 'high' not in price_data.columns or 'low' not in price_data.columns:
         return np.nan
     
-    # Aggregate 5-minute data to daily highs and lows
-    daily_data = price_data.resample('D', on='date_time').agg({'high': 'max', 'low': 'min'})
+    # Aggregate 5-minute data to daily highs and lows if not already daily
+    if price_data['date_time'].dt.freq != 'D':
+        daily_data = price_data.resample('D', on='date_time').agg({'high': 'max', 'low': 'min'})
+    else:
+        daily_data = price_data
+    
     daily_data = daily_data.dropna()
     
     if len(daily_data) < 1:
         return np.nan
     
-    # Sort by date_time and get the latest date
-    daily_data = daily_data.sort_index()
-    latest_date = daily_data.index[-1]
-    
-    # Ensure we have enough data for the period
-    start_date = latest_date - pd.Timedelta(days=period - 1)
-    period_data = daily_data[start_date:latest_date]
-    
-    if len(period_data) < period:
+    # Ensure we have enough data for the period (default window_days=1, so we use all available daily data)
+    if len(daily_data) < window_days:
         return np.nan
     
     # Calculate High/Low Returns (xtHL) for each day in the period
-    period_data['x_hl'] = np.log(period_data['high'] / period_data['low'])
+    daily_data['x_hl'] = np.log(daily_data['high'] / daily_data['low'])
     
-    # Calculate Parkinson Number (HL_HV_daily)
-    parkinson_sum = np.sum((period_data['x_hl'] ** 2) / (4 * np.log(2)))
-    parkinson_vol = np.sqrt(parkinson_sum / period)
+    # Calculate Parkinson Number (HL_HV_daily) over the specified window
+    parkinson_sum = np.sum((daily_data['x_hl'] ** 2) / (4 * np.log(2)))
+    parkinson_vol = np.sqrt(parkinson_sum / window_days)
     
     # Annualize the volatility (scale by sqrt of trading days per year)
     annualized_vol = parkinson_vol * np.sqrt(annualize_days)
