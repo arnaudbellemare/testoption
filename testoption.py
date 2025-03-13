@@ -497,6 +497,39 @@ def classify_vrp_regime(current_vrp, historical_vrps):
         return "Long Volatility"
     else:
         return "Neutral"
+def calculate_roger_satchell_volatility(price_data, window_days=7, annualize_days=365):
+    """
+    Calculate Realized Volatility using the Roger-Satchell estimator over a given window in days.
+    """
+    if price_data.empty or not set(['open', 'high', 'low', 'close']).issubset(price_data.columns):
+        return np.nan
+    
+    if "date_time" in price_data.columns:
+        daily_data = price_data.resample('D', on='date_time').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last'
+        }).dropna()
+    else:
+        daily_data = price_data.resample('D').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last'
+        }).dropna()
+    
+    if len(daily_data) < window_days:
+        return np.nan
+
+    daily_data = daily_data.iloc[-window_days:]
+    rs_squared = (
+        np.log(daily_data['high'] / daily_data['open']) * np.log(daily_data['high'] / daily_data['close']) +
+        np.log(daily_data['low'] / daily_data['open']) * np.log(daily_data['low'] / daily_data['close'])
+    )
+    daily_rs_vol = np.sqrt(rs_squared.mean())
+    annualized_vol = daily_rs_vol * np.sqrt(annualize_days)
+    return annualized_vol
 
 ###########################################
 # FUNCTION TO CALCULATE EXPECTED VALUE (EV) FOR ATM STRADDLE
@@ -726,7 +759,7 @@ def main():
     daily_iv = compute_daily_average_iv(df_iv_agg)
     historical_vrps = compute_historical_vrp(daily_iv, daily_rv)
     
-    # Evaluate trade strategy using our defined function
+    # Evaluate trade strategy
     st.subheader("Volatility Trading Decision Tool")
     risk_tolerance = st.sidebar.selectbox(
         "Risk Tolerance",
@@ -753,11 +786,10 @@ def main():
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
     
-    # For EV calculations, use a single scalar realized volatility
+    # For EV calculations, extract a scalar from the volatility series
     rv_series = calculate_roger_satchell_volatility(df_kraken, window_days=7, annualize_days=365)
     rv_scalar = rv_series.iloc[-1] if (not rv_series.empty and not pd.isna(rv_series).any()) else np.nan
     df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_scalar)
-
     if df_ev is not None and not df_ev.empty and not df_ev["EV"].isna().all():
         df_ev_clean = df_ev.dropna(subset=["EV"])
         if not df_ev_clean.empty:
@@ -772,13 +804,11 @@ def main():
     else:
         st.write("No ATM candidates found within tolerance for EV calculation.")
     
-    # Simulate trade button
     if st.button("Simulate Trade"):
         st.write("Simulating trade based on recommendation...")
         st.write("Position Size: Adjust based on capital (e.g., 1-5% of portfolio for chosen risk tolerance)")
         st.write("Monitor price and volatility in real-time and adjust hedges dynamically.")
     
-    # Volatility Smile Visualization
     if not df_calls.empty and not df_puts.empty:
         df_calls["gamma"] = df_calls.apply(lambda row: compute_gamma(row, spot_price), axis=1)
         df_puts["gamma"] = df_puts.apply(lambda row: compute_gamma(row, spot_price), axis=1)
@@ -812,7 +842,6 @@ def main():
         st.plotly_chart(fig_vol_smile, use_container_width=True)
         plot_gamma_heatmap(pd.concat([df_calls, df_puts]))
     
-    # Gamma Exposure (GEX) Visualization
     gex_data = []
     for instrument in all_instruments:
         ticker_data = fetch_ticker(instrument)
@@ -839,3 +868,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
