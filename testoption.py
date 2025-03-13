@@ -244,22 +244,38 @@ def fetch_kraken_data():
 # COMPUTE ROLLING VRP FUNCTION (using Roger-Satchell)
 ###########################################
 def compute_rolling_vrp(group, window_str):
-    def rs_variance(row):
-        try:
-            rs1 = np.log(row["mark_price_high"] / row["mark_price_open"])
-            rs2 = np.log(row["mark_price_high"] / row["mark_price_close"])
-            rs3 = np.log(row["mark_price_low"] / row["mark_price_open"])
-            rs4 = np.log(row["mark_price_low"] / row["mark_price_close"])
-            return rs1 * rs2 + rs3 * rs4
-        except Exception:
-            return np.nan
-
-    df = group.copy()
-    df["rs_variance"] = df.apply(rs_variance, axis=1)
-    rolling_rv = df["rs_variance"].rolling(window_str, min_periods=1).sum()
-    rolling_rv_annual = rolling_rv * (365 / 7)  # Assuming window_str covers 7 days
-    rolling_iv = df["iv_close"].rolling(window_str, min_periods=1).apply(lambda x: np.mean(x**2), raw=True)
-    vrp = rolling_iv - rolling_rv_annual
+    # Convert window string to number of days (e.g., '7D' -> 7)
+    window_days = int(window_str[:-1])
+    
+    # Resample to daily OHLC data and average IV
+    df = group.set_index('date_time').copy()
+    daily_df = df.resample('D').agg({
+        'mark_price_open': 'first',
+        'mark_price_high': 'max',
+        'mark_price_low': 'min',
+        'mark_price_close': 'last',
+        'iv_close': 'mean'
+    }).dropna()
+    
+    # Calculate daily Roger Satchell variance components
+    daily_df['rs_variance'] = (
+        np.log(daily_df['mark_price_high'] / daily_df['mark_price_open']) *
+        np.log(daily_df['mark_price_high'] / daily_df['mark_price_close']) +
+        np.log(daily_df['mark_price_low'] / daily_df['mark_price_open']) *
+        np.log(daily_df['mark_price_low'] / daily_df['mark_price_close'])
+    )
+    
+    # Calculate rolling sum of RS variance over the window
+    rolling_rv = daily_df['rs_variance'].rolling(window=window_days, min_periods=1).sum()
+    # Annualize the realized variance
+    rolling_rv_annual = rolling_rv * (365 / window_days)
+    
+    # Calculate rolling average of squared IV (implied variance)
+    rolling_iv = (daily_df['iv_close'] ** 2).rolling(window=window_days, min_periods=1).mean()
+    
+    # Compute VRP and forward-fill to match original timestamps
+    vrp = (rolling_iv - rolling_rv_annual).reindex(df.index, method='ffill')
+    
     return vrp
 
 ###########################################
