@@ -83,7 +83,6 @@ def compute_expiry_date(selected_day, current_date=None):
     """
     if current_date is None:
         current_date = dt.datetime.now()
-    # If current day is less than the selected day, expiration is in current month.
     if current_date.day < selected_day:
         try:
             expiry = current_date.replace(day=selected_day, hour=0, minute=0, second=0, microsecond=0)
@@ -116,11 +115,9 @@ def load_credentials():
             usernames = [line.strip() for line in f_user if line.strip()]
         with open("passwords.txt", "r") as f_pass:
             passwords = [line.strip() for line in f_pass if line.strip()]
-        
         if len(usernames) != len(passwords):
             st.error("The number of usernames and passwords do not match.")
             return {}
-        
         creds = dict(zip(usernames, passwords))
         return creds
     except Exception as e:
@@ -128,13 +125,9 @@ def load_credentials():
         return {}
 
 def login():
-    """
-    Displays a login form and validates the credentials.
-    The dashboard will only load after successful authentication.
-    """
+    """Display a login form and validate credentials."""
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
-
     if not st.session_state.logged_in:
         st.title("Please Log In")
         username = st.text_input("Username")
@@ -191,47 +184,34 @@ def get_filtered_instruments(spot_price, expiry_str=DEFAULT_EXPIRY_STR, t_years=
     Raises an exception if no valid instruments are found.
     """
     instruments_list = fetch_instruments()
-    
-    # Use the user-selected expiry for filtering
     calls_all = get_option_instruments(instruments_list, "C", expiry_str)
     puts_all = get_option_instruments(instruments_list, "P", expiry_str)
-    
     if not calls_all:
         raise Exception(f"No call instruments found for expiry {expiry_str}.")
-    
     strike_list = []
     for inst in calls_all:
         parts = inst.split("-")
         if len(parts) >= 3 and parts[2].isdigit():
             strike_list.append((inst, int(parts[2])))
-    
     if not strike_list:
         raise Exception(f"No valid call instruments with strikes found for expiry {expiry_str}.")
-    
     strike_list.sort(key=lambda x: x[1])
     strikes = [s for _, s in strike_list]
     if not strikes:
         raise Exception("No strikes available for filtering.")
-    
     closest_index = min(range(len(strikes)), key=lambda i: abs(strikes[i] - spot_price))
     nearest_instrument = strike_list[closest_index][0]
-    
     actual_iv = get_actual_iv(nearest_instrument)
     if actual_iv is None:
         raise Exception("Could not fetch actual IV for the nearest instrument.")
-    
     lower_bound = spot_price * np.exp(-actual_iv * np.sqrt(t_years) * multiplier)
     upper_bound = spot_price * np.exp(actual_iv * np.sqrt(t_years) * multiplier)
-    
     filtered_calls = [inst for inst in calls_all if lower_bound <= int(inst.split("-")[2]) <= upper_bound]
     filtered_puts = [inst for inst in puts_all if lower_bound <= int(inst.split("-")[2]) <= upper_bound]
-    
     filtered_calls.sort(key=lambda x: int(x.split("-")[2]))
     filtered_puts.sort(key=lambda x: int(x.split("-")[2]))
-    
     if not filtered_calls and not filtered_puts:
         raise Exception("No instruments left after applying the theoretical range filter.")
-    
     return filtered_calls, filtered_puts
 
 ###########################################
@@ -345,7 +325,6 @@ def compute_average_delta(df_calls, df_puts, S):
         df_calls["delta"] = df_calls.apply(lambda row: compute_delta(row, S), axis=1)
     if "delta" not in df_puts.columns:
         df_puts["delta"] = df_puts.apply(lambda row: compute_delta(row, S), axis=1)
-    
     df_calls_mean = (
         df_calls.groupby("date_time", as_index=False)["delta"]
         .mean()
@@ -523,7 +502,6 @@ def compute_daily_average_iv(df_iv_agg):
     """
     Compute daily average IV from the iv_mean column in df_iv_agg.
     """
-    # Ensure we aggregate only numeric values.
     daily_iv = df_iv_agg["iv_mean"].resample("D").mean(numeric_only=True).dropna().tolist()
     return daily_iv
 
@@ -551,6 +529,36 @@ def calculate_realized_volatility(price_data, window_days=7):
     return annualized_vol.iloc[-1] if not annualized_vol.empty else np.nan
 
 ###########################################
+# FUNCTION TO CALCULATE EXPECTED VALUE (EV) FOR ATM STRADDLE
+###########################################
+def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv):
+    """
+    For options within ±2% of the spot, group by strike and average the IV.
+    Then compute EV for an ATM straddle using:
+        EV = S * (RV - avg IV) * sqrt(2T/π)
+    Returns a DataFrame with candidate strikes, average IV, and EV.
+    """
+    tolerance = 0.02 * spot_price
+    atm_candidates = [item for item in ticker_list if abs(item["strike"] - spot_price) <= tolerance]
+    if not atm_candidates:
+        return None
+    atm_strikes = {}
+    for item in atm_candidates:
+        strike = item["strike"]
+        if strike not in atm_strikes:
+            atm_strikes[strike] = {"iv_sum": item["iv"], "count": 1}
+        else:
+            atm_strikes[strike]["iv_sum"] += item["iv"]
+            atm_strikes[strike]["count"] += 1
+    ev_candidates = []
+    for strike, data in atm_strikes.items():
+        avg_iv = data["iv_sum"] / data["count"]
+        ev_value = spot_price * (rv - avg_iv) * np.sqrt(2 * T / np.pi)
+        ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV": ev_value})
+    df_ev = pd.DataFrame(ev_candidates)
+    return df_ev.sort_values("EV", ascending=False)
+
+###########################################
 # TRADE STRATEGY EVALUATION (USING PERCENTILES)
 ###########################################
 def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None,
@@ -562,10 +570,8 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
     rv = calculate_realized_volatility(df_kraken)
     iv = df["iv_close"].mean() if not df.empty else np.nan
 
-    # Classify current volatility regime using historical realized volatility
+    # Classify volatility and VRP regimes based on historical percentiles
     vol_regime = classify_volatility_regime(rv, historical_vols) if historical_vols and len(historical_vols) > 0 else "Neutral"
-    
-    # Compute current VRP and classify its regime
     current_vrp = iv - rv
     vrp_regime = classify_vrp_regime(current_vrp, historical_vrps) if historical_vrps and len(historical_vrps) > 0 else "Neutral"
 
@@ -592,7 +598,7 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
     avg_call_gamma = df_calls["gamma"].mean() if not df_calls.empty else 0
     avg_put_gamma = df_puts["gamma"].mean() if not df_puts.empty else 0
 
-    # Risk profile–specific decision logic based on percentile classifications
+    # Decision logic based on VRP regime and risk tolerance:
     if vrp_regime == "Long Volatility":
         if risk_tolerance == "Conservative":
             recommendation = "Long Volatility (Conservative): Buy limited OTM Puts"
@@ -602,7 +608,7 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
             recommendation = "Long Volatility (Neutral): Consider delta-hedged straddles"
             position = "ATM Straddle"
             hedge_action = "Implement dynamic delta hedging"
-        else:  # Aggressive
+        else:
             recommendation = "Long Volatility (Aggressive): Take leveraged long volatility positions"
             position = "Leveraged Long Straddle"
             hedge_action = "Aggressively hedge using BTC futures"
@@ -615,7 +621,7 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
             recommendation = "Short Volatility (Neutral): Sell strangles with tight stops"
             position = "Strangle"
             hedge_action = "Monitor and adjust hedge dynamically"
-        else:  # Aggressive
+        else:
             recommendation = "Short Volatility (Aggressive): Consider naked call selling"
             position = "Naked Calls"
             hedge_action = "Aggressively hedge with BTC futures"
@@ -640,45 +646,12 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
     }
 
 ###########################################
-# ADDITIONAL FUNCTION: CALCULATE EV FOR ATM STRADDLE
-###########################################
-def calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv):
-    """
-    For options within a ±2% range of the spot, group by strike and compute the average IV.
-    Then compute EV for an ATM straddle using:
-        EV = S * (RV - IV_avg) * sqrt(2T / π)
-    Returns a DataFrame with candidate strikes, average IV and EV.
-    """
-    tolerance = 0.02 * spot_price
-    atm_candidates = [item for item in ticker_list if abs(item["strike"] - spot_price) <= tolerance]
-    if not atm_candidates:
-        return None
-    # Group by strike and average the IV from available options
-    atm_strikes = {}
-    for item in atm_candidates:
-        strike = item["strike"]
-        if strike not in atm_strikes:
-            atm_strikes[strike] = {"iv_sum": item["iv"], "count": 1}
-        else:
-            atm_strikes[strike]["iv_sum"] += item["iv"]
-            atm_strikes[strike]["count"] += 1
-    ev_candidates = []
-    for strike, data in atm_strikes.items():
-        avg_iv = data["iv_sum"] / data["count"]
-        ev_value = spot_price * (rv - avg_iv) * np.sqrt(2 * T_YEARS / np.pi)
-        ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV": ev_value})
-    df_ev = pd.DataFrame(ev_candidates)
-    return df_ev.sort_values("Strike")
-
-###########################################
 # MODIFIED MAIN DASHBOARD
 ###########################################
 def main():
     # Login Section
     login()  # Ensure user is logged in
-    
     st.title("Crypto Options Visualization Dashboard (Plotly Version) with Volatility Trading Decisions")
-    
     if st.button("Logout"):
         st.session_state.logged_in = False
         st.stop()
@@ -746,7 +719,7 @@ def main():
     )
     df_iv_agg_reset = df_iv_agg.reset_index()
 
-    # Build ticker_list for open interest and delta analysis using T_YEARS for proper delta calculation
+    # Build ticker_list for open interest, delta and record IV using T_YEARS for proper delta calculation
     global ticker_list
     ticker_list = []
     for instrument in all_instruments:
@@ -783,7 +756,7 @@ def main():
     daily_iv = compute_daily_average_iv(df_iv_agg)
     historical_vrps = compute_historical_vrp(daily_iv, daily_rv)
     
-    # NEW: VOLATILITY TRADING DECISION TOOL using percentile-based risk classification
+    # VOLATILITY TRADING DECISION TOOL using percentile-based risk classification
     st.subheader("Volatility Trading Decision Tool")
     risk_tolerance = st.sidebar.selectbox(
         "Risk Tolerance",
@@ -809,15 +782,18 @@ def main():
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
     
-    # Compute EV for ATM straddle candidates using Black-Scholes approximation:
+    # For any recommendation that involves buying straddles, compute EV for candidate ATM strikes.
+    # (Here, we use the overall realized volatility from Kraken as RV.)
     rv_overall = calculate_realized_volatility(df_kraken)
     df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_overall)
     if df_ev is not None and not df_ev.empty:
-        best_strike = df_ev.iloc[(df_ev["EV"].abs()).argmin()]["Strike"]
+        # Choose the candidate with the highest EV
+        best_candidate = df_ev.loc[df_ev["EV"].idxmax()]
+        best_strike = best_candidate["Strike"]
         st.subheader("ATM Straddle EV Analysis")
-        st.write("Candidate Strikes and their EV (in $):")
+        st.write("Candidate Strikes and their Expected Value (EV) in $:")
         st.dataframe(df_ev)
-        st.write(f"Recommended ATM Strike based on EV: {best_strike}")
+        st.write(f"Recommended ATM Strike based on highest EV: {best_strike}")
     else:
         st.write("No ATM candidates found within tolerance for EV calculation.")
     
