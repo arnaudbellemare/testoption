@@ -136,14 +136,14 @@ def fetch_instruments():
     data = response.json()
     return data.get("result", [])
 
-def get_option_instruments(instruments, option_type):
+def get_option_instruments(instruments, option_type, expiry_str):
     """
-    Filter instruments for options (calls or puts) for BTC with expiry (using default expiry).
+    Filter instruments for options (calls or puts) for BTC using the provided expiry.
     Option type should be 'C' for calls or 'P' for puts.
     """
     filtered = [
         inst["instrument_name"] for inst in instruments
-        if inst["instrument_name"].startswith("BTC-" + DEFAULT_EXPIRY_STR) and inst["instrument_name"].endswith(f"-{option_type}")
+        if inst["instrument_name"].startswith(f"BTC-{expiry_str}") and inst["instrument_name"].endswith(f"-{option_type}")
     ]
     return sorted(filtered)
 
@@ -167,8 +167,8 @@ def get_filtered_instruments(spot_price, expiry_str=DEFAULT_EXPIRY_STR, t_years=
     Filter instruments based on the theoretical range derived from a standard deviation move.
     """
     instruments_list = fetch_instruments()
-    calls_all = get_option_instruments(instruments_list, "C")
-    puts_all = get_option_instruments(instruments_list, "P")
+    calls_all = get_option_instruments(instruments_list, "C", expiry_str)
+    puts_all = get_option_instruments(instruments_list, "P", expiry_str)
     
     strike_list = [(inst, int(inst.split("-")[2])) for inst in calls_all]
     strike_list.sort(key=lambda x: x[1])
@@ -255,11 +255,14 @@ def fetch_kraken_data():
 def compute_rolling_vrp(group, window_str):
     """
     Computes rolling variance risk premium (VRP) for a given group over the specified window.
-    VRP = (rolling average of squared IV) - (rolling sum of squared log returns)
+    Adjusts the realized volatility to an annualized basis using a 7-day window.
+    VRP = (rolling average of squared IV) - (annualized rolling sum of squared log returns)
     """
     rolling_rv = group["log_return"].expanding(min_periods=1).apply(lambda x: np.nansum(x**2), raw=True)
     rolling_iv = group["iv_close"].rolling(window_str, min_periods=1).apply(lambda x: np.mean(x**2), raw=True)
-    return rolling_iv - rolling_rv
+    rolling_rv_annual = rolling_rv * (365 / 7)  # Annualize 7-day realized volatility
+    vrp = rolling_iv - rolling_rv_annual
+    return vrp
 
 ###########################################
 # OPTION DELTA CALCULATION FUNCTION
@@ -431,19 +434,19 @@ def plot_net_gex(df_gex, spot_price):
 def calculate_realized_volatility(price_data, window_days=7):
     """
     Calculate realized volatility (annualized) from price data over a specified window.
-    Uses log returns from the "close" column and annualizes by sqrt(252) trading days.
+    Uses log returns from the "close" column and annualizes by sqrt(365) for a 24/7 market.
     """
     if price_data.empty:
         return np.nan
     price_data = price_data.sort_values("date_time")
     log_returns = np.log(price_data["close"] / price_data["close"].shift(1))
     daily_vol = log_returns.rolling(window=int(window_days * 24 * 12), min_periods=1).std()  # ~336 intervals/day
-    annualized_vol = daily_vol * np.sqrt(365)
+    annualized_vol = daily_vol * np.sqrt(365)  # 365 days for crypto
     return annualized_vol.iloc[-1] if not annualized_vol.empty else np.nan
 
-def compare_volatility(iv, rv, threshold=0.1):
+def compare_volatility(iv, rv, threshold):
     """
-    Compare implied volatility (IV) to realized volatility (RV) to recommend volatility direction.
+    Compare implied volatility (IV) to realized volatility (RV) using a dynamic threshold.
     Returns "Vol Up" if IV < RV - threshold, "Vol Down" if IV > RV + threshold, "Neutral" otherwise.
     """
     if pd.isna(iv) or pd.isna(rv):
@@ -455,7 +458,7 @@ def compare_volatility(iv, rv, threshold=0.1):
     else:
         return "Neutral"
 
-def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None):
+def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None, threshold=0.1):
     """
     Evaluate market conditions and recommend a volatility trading strategy.
     Uses IV, RV, delta, gamma, and open interest to suggest long vol, short vol, or gamma scalping.
@@ -463,32 +466,35 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
     """
     rv = calculate_realized_volatility(df_kraken)
     iv = df["iv_close"].mean() if not df.empty else np.nan
-    vol_direction = compare_volatility(iv, rv)
+    vol_direction = compare_volatility(iv, rv, threshold)
     latest_regime = (df_iv_agg_reset["market_regime"].iloc[-1]
                      if (df_iv_agg_reset is not None and "market_regime" in df_iv_agg_reset.columns and not df_iv_agg_reset.empty)
                      else "Neutral")
     
+    # Use open-interest–weighted averages for delta calculations
+    call_items = [item for item in ticker_list if item["option_type"] == "C"]
+    put_items = [item for item in ticker_list if item["option_type"] == "P"]
+    call_oi_total = sum(item["open_interest"] for item in call_items)
+    put_oi_total = sum(item["open_interest"] for item in put_items)
+    
+    avg_call_delta = (sum(item["delta"] * item["open_interest"] for item in call_items) / call_oi_total) if call_oi_total > 0 else 0
+    avg_put_delta = (sum(item["delta"] * item["open_interest"] for item in put_items) / put_oi_total) if put_oi_total > 0 else 0
+
+    df_ticker = pd.DataFrame(ticker_list) if ticker_list else pd.DataFrame()
+    total_oi = df_ticker["open_interest"].sum() if not df_ticker.empty else 0
+    call_oi = df_ticker[df_ticker["option_type"] == "C"]["open_interest"].sum() if not df_ticker.empty else 0
+    put_oi = df_ticker[df_ticker["option_type"] == "P"]["open_interest"].sum() if not df_ticker.empty else 0
+    put_call_ratio = put_oi / call_oi if call_oi > 0 else np.inf
+
+    # (Optionally, gamma metrics can be weighted similarly if desired)
     df_calls = df[df["option_type"] == "C"].copy()
     df_puts = df[df["option_type"] == "P"].copy()
-    if "delta" not in df_calls.columns:
-        df_calls["delta"] = df_calls.apply(lambda row: compute_delta(row, spot_price), axis=1)
-    if "delta" not in df_puts.columns:
-        df_puts["delta"] = df_puts.apply(lambda row: compute_delta(row, spot_price), axis=1)
     if "gamma" not in df_calls.columns:
         df_calls["gamma"] = df_calls.apply(lambda row: compute_gamma(row, spot_price), axis=1)
     if "gamma" not in df_puts.columns:
         df_puts["gamma"] = df_puts.apply(lambda row: compute_gamma(row, spot_price), axis=1)
-    
-    avg_call_delta = df_calls["delta"].mean() if not df_calls.empty else 0
-    avg_put_delta = df_puts["delta"].mean() if not df_puts.empty else 0
     avg_call_gamma = df_calls["gamma"].mean() if not df_calls.empty else 0
     avg_put_gamma = df_puts["gamma"].mean() if not df_puts.empty else 0
-    
-    df_ticker = pd.DataFrame(ticker_list) if ticker_list else pd.DataFrame()
-    total_oi = df_ticker["open_interest"].sum() if not df_ticker.empty else 0
-    put_oi = df_ticker[df_ticker["option_type"] == "P"]["open_interest"].sum() if not df_ticker.empty else 0
-    call_oi = df_ticker[df_ticker["option_type"] == "C"]["open_interest"].sum() if not df_ticker.empty else 0
-    put_call_ratio = put_oi / call_oi if call_oi > 0 else np.nan
     
     recommendation = "Neutral"
     position = None
@@ -570,6 +576,9 @@ def main():
     )
     multiplier = 1 if "1 Standard" in deviation_option else 2
 
+    # Dynamic Volatility Threshold for decision making
+    threshold = st.sidebar.slider("Volatility Threshold (%)", 1.0, 20.0, 10.0) / 100
+
     # Fetch Kraken data
     global df_kraken
     df_kraken = fetch_kraken_data()
@@ -605,27 +614,14 @@ def main():
     df_iv_agg["date_time"] = pd.to_datetime(df_iv_agg["date_time"])
     df_iv_agg = df_iv_agg.set_index("date_time")
     df_iv_agg = df_iv_agg.resample("5T").mean().ffill()
-
-    # Compute the rolling mean on the datetime-indexed DataFrame
     df_iv_agg = df_iv_agg.sort_index()  # ensure it's sorted by date_time
     df_iv_agg["rolling_mean"] = df_iv_agg["iv_mean"].rolling("1D").mean()
-
     df_iv_agg["market_regime"] = np.where(
         df_iv_agg["iv_mean"] > df_iv_agg["rolling_mean"], "Risk-Off", "Risk-On"
     )
-
-    # Reset the index for later use if needed
     df_iv_agg_reset = df_iv_agg.reset_index()
 
-    # Create a simple market regime column for decision-making:
-    df_iv_agg_reset = df_iv_agg.reset_index()  # date_time becomes a column now
-    df_iv_agg_reset["rolling_mean"] = df_iv_agg_reset.rolling("1D", on="date_time")["iv_mean"].mean()
-
-    df_iv_agg_reset["market_regime"] = np.where(
-        df_iv_agg_reset["iv_mean"] > df_iv_agg_reset["rolling_mean"], "Risk-Off", "Risk-On"
-    )
-    
-    # Build ticker_list for open interest and delta analysis
+    # Build ticker_list for open interest and delta analysis, using T_YEARS for proper delta calculation
     global ticker_list
     ticker_list = []
     for instrument in all_instruments:
@@ -642,9 +638,10 @@ def main():
         iv_val = ticker_data.get("iv", None)
         if iv_val is None:
             continue
-        T_est = 0.05
+        # Use computed T_YEARS rather than a hardcoded T_est
+        T = T_YEARS
         try:
-            d1 = (np.log(spot_price / strike) + 0.5 * iv_val**2 * T_est) / (iv_val * np.sqrt(T_est))
+            d1 = (np.log(spot_price / strike) + 0.5 * iv_val**2 * T) / (iv_val * np.sqrt(T))
         except Exception:
             continue
         delta_est = norm.cdf(d1) if option_type == "C" else norm.cdf(d1) - 1
@@ -663,7 +660,7 @@ def main():
         options=["Conservative", "Moderate", "Aggressive"],
         index=1
     )
-    trade_decision = evaluate_trade_strategy(df, spot_price, risk_tolerance, df_iv_agg_reset)
+    trade_decision = evaluate_trade_strategy(df, spot_price, risk_tolerance, df_iv_agg_reset, threshold)
     
     st.write("### Market and Volatility Metrics")
     st.write(f"Implied Volatility (IV): {trade_decision['iv']:.2%}")
@@ -673,10 +670,8 @@ def main():
     st.write(f"Put/Call Open Interest Ratio: {trade_decision['put_call_ratio']:.2f}")
     st.write(f"Average Call Delta: {trade_decision['avg_call_delta']:.4f}")
     st.write(f"Average Put Delta: {trade_decision['avg_put_delta']:.4f}")
-    # Display gamma values with higher precision
     st.write(f"Average Gamma: {trade_decision['avg_call_gamma']:.6f}")
    
-    
     st.write("### Trading Recommendation")
     st.write(f"**Recommendation:** {trade_decision['recommendation']}")
     st.write(f"**Position:** {trade_decision['position']}")
