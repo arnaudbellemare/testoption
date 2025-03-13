@@ -236,8 +236,11 @@ def fetch_kraken_data():
     df_kraken["date_time"] = pd.to_datetime(df_kraken["timestamp"], unit="ms")
     df_kraken["date_time"] = df_kraken["date_time"].dt.tz_localize("UTC").dt.tz_convert("America/New_York")
     df_kraken = df_kraken.sort_values(by="date_time").reset_index(drop=True)
-    cutoff_start = (now_dt - dt.timedelta(days=180)).astimezone(df_kraken["date_time"].dt.tz)
+# Get the timezone from the first timestamp in the column
+    tzinfo = df_kraken["date_time"].iloc[0].tzinfo
+    cutoff_start = (now_dt - dt.timedelta(days=180)).astimezone(tzinfo)
     df_kraken = df_kraken[df_kraken["date_time"] >= cutoff_start]
+
     return df_kraken
 
 ###########################################
