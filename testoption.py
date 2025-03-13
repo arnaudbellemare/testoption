@@ -354,8 +354,12 @@ def compute_gamma(row, S):
     sigma = row["iv_close"]
     if sigma <= 0:
         return np.nan
-    d1 = (np.log(S / K) + 0.5 * sigma**2 * T) / (sigma * np.sqrt(T))
-    return norm.pdf(d1) / (S * sigma * np.sqrt(T))
+    try:
+        d1 = (np.log(S / K) + 0.5 * sigma**2 * T) / (sigma * np.sqrt(T))
+    except Exception:
+        return np.nan
+    gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
+    return gamma
 
 def compute_gex(row, S, oi):
     """
@@ -669,8 +673,9 @@ def main():
     st.write(f"Put/Call Open Interest Ratio: {trade_decision['put_call_ratio']:.2f}")
     st.write(f"Average Call Delta: {trade_decision['avg_call_delta']:.4f}")
     st.write(f"Average Put Delta: {trade_decision['avg_put_delta']:.4f}")
-    st.write(f"Average Call Gamma: {trade_decision['avg_call_gamma']:.4f}")
-    st.write(f"Average Put Gamma: {trade_decision['avg_put_gamma']:.4f}")
+    # Display gamma values with higher precision
+    st.write(f"Average Call Gamma: {trade_decision['avg_call_gamma']:.6f}")
+    st.write(f"Average Put Gamma: {trade_decision['avg_put_gamma']:.6f}")
     
     st.write("### Trading Recommendation")
     st.write(f"**Recommendation:** {trade_decision['recommendation']}")
