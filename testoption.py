@@ -61,7 +61,7 @@ COLUMNS = [
 ###########################################
 def get_valid_expiration_options(current_date):
     """
-    Returns a list of valid expiration dates (as strings) using only 14 and 28 days from now.
+    Returns a list of valid expiration dates using only 14 and 28 days from now.
     """
     options = []
     for days in [14, 28]:
@@ -602,8 +602,7 @@ def main():
     df_iv_agg = df_iv_agg.resample("5T").mean().ffill()
     global df_iv_agg_reset
     df_iv_agg_reset = df_iv_agg.reset_index()
-    # For the purpose of decision-making, we need a "market_regime" column.
-    # Here, we use a simple rule: if the aggregated IV is above its rolling mean, we call it "Risk-Off", otherwise "Risk-On".
+    # Create a simple market regime column for decision-making:
     df_iv_agg_reset["rolling_mean"] = df_iv_agg_reset["iv_mean"].rolling("1D", min_periods=1).mean()
     df_iv_agg_reset["market_regime"] = np.where(df_iv_agg_reset["iv_mean"] > df_iv_agg_reset["rolling_mean"], "Risk-Off", "Risk-On")
     
