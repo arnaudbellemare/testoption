@@ -235,7 +235,6 @@ def fetch_kraken_data():
     df_kraken["date_time"] = pd.to_datetime(df_kraken["timestamp"], unit="ms")
     df_kraken["date_time"] = df_kraken["date_time"].dt.tz_localize("UTC").dt.tz_convert("America/New_York")
     df_kraken = df_kraken.sort_values(by="date_time").reset_index(drop=True)
-    # Get the timezone from the first timestamp in the column
     tzinfo = df_kraken["date_time"].iloc[0].tzinfo
     cutoff_start = (now_dt - dt.timedelta(days=7)).astimezone(tzinfo)
     df_kraken = df_kraken[df_kraken["date_time"] >= cutoff_start]
@@ -245,7 +244,6 @@ def fetch_kraken_data():
 # COMPUTE ROLLING VRP FUNCTION (using Roger-Satchell)
 ###########################################
 def compute_rolling_vrp(group, window_str):
-    # Define a function to compute the Roger-Satchell variance for a single period.
     def rs_variance(row):
         try:
             rs1 = np.log(row["mark_price_high"] / row["mark_price_open"])
@@ -259,8 +257,7 @@ def compute_rolling_vrp(group, window_str):
     df = group.copy()
     df["rs_variance"] = df.apply(rs_variance, axis=1)
     rolling_rv = df["rs_variance"].rolling(window_str, min_periods=1).sum()
-    # Annualize the realized variance (assuming window_str covers 7 days)
-    rolling_rv_annual = rolling_rv * (365 / 7)
+    rolling_rv_annual = rolling_rv * (365 / 7)  # Assuming window_str covers 7 days
     rolling_iv = df["iv_close"].rolling(window_str, min_periods=1).apply(lambda x: np.mean(x**2), raw=True)
     vrp = rolling_iv - rolling_rv_annual
     return vrp
@@ -468,11 +465,9 @@ def calculate_roger_satchell_volatility(price_data, window_days=7, annualize_day
     Returns:
         float: Annualized Roger-Satchell volatility, or np.nan if data is insufficient.
     """
-    # Check for required columns
     if price_data.empty or not set(['open', 'high', 'low', 'close']).issubset(price_data.columns):
         return np.nan
     
-    # Resample the 5-minute data to daily OHLC bars
     daily_data = price_data.resample('D', on='date_time').agg({
         'open': 'first',
         'high': 'max',
@@ -480,23 +475,17 @@ def calculate_roger_satchell_volatility(price_data, window_days=7, annualize_day
         'close': 'last'
     }).dropna()
     
-    # Ensure enough days of data are available
     if len(daily_data) < window_days:
         return np.nan
 
-    # Use the last 'window_days' of data
     daily_data = daily_data.iloc[-window_days:]
     
-    # Calculate the daily Roger-Satchell variance
     rs_squared = (
         np.log(daily_data['high'] / daily_data['open']) * np.log(daily_data['high'] / daily_data['close']) +
         np.log(daily_data['low'] / daily_data['open']) * np.log(daily_data['low'] / daily_data['close'])
     )
     
-    # Compute mean daily RS variance and then take square root for daily volatility
     daily_rs_vol = np.sqrt(rs_squared.mean())
-    
-    # Annualize the daily volatility
     annualized_vol = daily_rs_vol * np.sqrt(annualize_days)
     return annualized_vol
 
@@ -539,7 +528,6 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
     rv = calculate_roger_satchell_volatility(df_kraken, window_days=7, annualize_days=365)
     iv = df["iv_close"].mean() if not df.empty else np.nan
 
-    # Alert if IV and RV diverge significantly
     divergence = abs(iv - rv) / rv if rv != 0 else np.nan
     if not np.isnan(divergence) and divergence > 0.20:
         st.write(f"Alert: IV and RV diverge by {divergence*100:.2f}% (threshold: 20%).")
@@ -750,12 +738,15 @@ def main():
     df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_overall)
     if df_ev is not None and not df_ev.empty and not df_ev["EV"].isna().all():
         df_ev_clean = df_ev.dropna(subset=["EV"])
-        best_candidate = df_ev_clean.loc[df_ev_clean["EV"].idxmax()]
-        best_strike = best_candidate["Strike"]
-        st.subheader("ATM Straddle EV Analysis")
-        st.write("Candidate Strikes and their Expected Value (EV) in $:")
-        st.dataframe(df_ev_clean)
-        st.write(f"Recommended ATM Strike based on highest EV: {best_strike}")
+        if not df_ev_clean.empty:
+            best_candidate = df_ev_clean.loc[df_ev_clean["EV"].idxmax()]
+            best_strike = best_candidate["Strike"]
+            st.subheader("ATM Straddle EV Analysis")
+            st.write("Candidate Strikes and their Expected Value (EV) in $:")
+            st.dataframe(df_ev_clean)
+            st.write(f"Recommended ATM Strike based on highest EV: {best_strike}")
+        else:
+            st.write("No ATM candidates found with valid EV values.")
     else:
         st.write("No ATM candidates found within tolerance for EV calculation.")
     
