@@ -591,17 +591,25 @@ def main():
     df_puts = df[df["option_type"] == "P"].copy().sort_values("date_time")
     
     # Compute aggregated IV for regime analysis
+# Compute aggregated IV for regime analysis
     df_iv_agg = (
         df.groupby("date_time", as_index=False)["iv_close"]
         .mean()
         .rename(columns={"iv_close": "iv_mean"})
     )
-    df_iv_agg = df_iv_agg.sort_values("date_time").reset_index(drop=True)
     df_iv_agg["date_time"] = pd.to_datetime(df_iv_agg["date_time"])
     df_iv_agg = df_iv_agg.set_index("date_time")
     df_iv_agg = df_iv_agg.resample("5T").mean().ffill()
-    global df_iv_agg_reset
+
+# Now compute the rolling mean on the datetime-indexed DataFrame
+    df_iv_agg["rolling_mean"] = df_iv_agg["iv_mean"].rolling("1D", min_periods=1).mean()
+    df_iv_agg["market_regime"] = np.where(
+        df_iv_agg["iv_mean"] > df_iv_agg["rolling_mean"], "Risk-Off", "Risk-On"
+    )
+
+# Reset the index for later use if needed
     df_iv_agg_reset = df_iv_agg.reset_index()
+
     # Create a simple market regime column for decision-making:
     df_iv_agg_reset["rolling_mean"] = df_iv_agg_reset["iv_mean"].rolling("1D", min_periods=1).mean()
     df_iv_agg_reset["market_regime"] = np.where(df_iv_agg_reset["iv_mean"] > df_iv_agg_reset["rolling_mean"], "Risk-Off", "Risk-On")
