@@ -615,6 +615,7 @@ def main():
         st.session_state.logged_in = False
         st.stop()
     
+    # Set expiration date and tolerance options
     current_date = dt.datetime.now()
     valid_days = get_valid_expiration_options(current_date)
     selected_day = st.sidebar.selectbox("Choose Expiration Day", options=valid_days)
@@ -634,6 +635,7 @@ def main():
     )
     multiplier = 1 if "1 Standard" in deviation_option else 2
 
+    # Fetch Kraken data (dual timeframe)
     global df_kraken
     df_kraken = fetch_kraken_data()
     if df_kraken.empty:
@@ -650,15 +652,16 @@ def main():
     st.write("Filtered Call Instruments:", filtered_calls)
     st.write("Filtered Put Instruments:", filtered_puts)
     all_instruments = filtered_calls + filtered_puts
-    
+
     df = fetch_data(tuple(all_instruments))
     if df.empty:
         st.error("No data fetched from Thalex. Please check the API or instrument names.")
         return
-    
+
     df_calls = df[df["option_type"] == "C"].copy().sort_values("date_time")
     df_puts = df[df["option_type"] == "P"].copy().sort_values("date_time")
     
+    # Aggregate IV data
     df_iv_agg = (
         df.groupby("date_time", as_index=False)["iv_close"]
         .mean()
@@ -673,6 +676,7 @@ def main():
     )
     df_iv_agg_reset = df_iv_agg.reset_index()
 
+    # Build ticker list for EV and strategy analysis
     global ticker_list
     ticker_list = []
     for instrument in all_instruments:
@@ -714,10 +718,12 @@ def main():
         options=["Conservative", "Moderate", "Aggressive"],
         index=1
     )
-    trade_decision = evaluate_trade_strategy(df, spot_price, risk_tolerance, df_iv_agg_reset,
-                                               historical_vols=daily_rv,
-                                               historical_vrps=historical_vrps,
-                                               days_to_expiration=days_to_expiration)
+    trade_decision = evaluate_trade_strategy(
+        df, spot_price, risk_tolerance, df_iv_agg_reset,
+        historical_vols=daily_rv,
+        historical_vrps=historical_vrps,
+        days_to_expiration=days_to_expiration
+    )
     
     st.write("### Market and Volatility Metrics")
     st.write(f"Implied Volatility (IV): {trade_decision['iv']:.2%}")
@@ -734,23 +740,46 @@ def main():
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
     
-    # For EV calculation, extract the latest realized volatility value (scalar) for current expiration
-    rv_series = calculate_parkinson_volatility(df_kraken, window_days=7, annualize_days=365)
-    rv_scalar = rv_series.iloc[-1] if not rv_series.empty else np.nan
-    df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_scalar)
-    if df_ev is not None and not df_ev.empty and not df_ev["EV"].isna().all():
-        df_ev_clean = df_ev.dropna(subset=["EV"])
-        if not df_ev_clean.empty:
-            best_candidate = df_ev_clean.loc[df_ev_clean["EV"].idxmax()]
-            best_strike = best_candidate["Strike"]
-            st.subheader("ATM Straddle EV Analysis")
-            st.write("Candidate Strikes and their Expected Value (EV) in $:")
-            st.dataframe(df_ev_clean)  # EV table correctly shown
-            st.write(f"Recommended ATM Strike based on highest EV: {best_strike}")
+    # EV Analysis: Perform EV analysis based on the suggested position.
+    # We can extend this logic to support EV analysis for every possible position.
+    position = trade_decision['position']
+    if position in ["ATM Straddle", "Leveraged Long Straddle"]:
+        # For straddles, use ATM straddle EV analysis.
+        rv_series = calculate_parkinson_volatility(df_kraken, window_days=7, annualize_days=365)
+        rv_scalar = rv_series.iloc[-1] if not rv_series.empty else np.nan
+        df_ev = calculate_atm_straddle_ev(ticker_list, spot_price, T_YEARS, rv_scalar)
+        if df_ev is not None and not df_ev.empty and not df_ev["EV"].isna().all():
+            df_ev_clean = df_ev.dropna(subset=["EV"])
+            if not df_ev_clean.empty:
+                best_candidate = df_ev_clean.loc[df_ev_clean["EV"].idxmax()]
+                best_strike = best_candidate["Strike"]
+                st.subheader("ATM Straddle EV Analysis")
+                st.write("Candidate Strikes and their Expected Value (EV) in $:")
+                st.dataframe(df_ev_clean)  # EV table correctly shown
+                st.write(f"Recommended ATM Strike based on highest EV: {best_strike}")
+            else:
+                st.write("No ATM candidates found with valid EV values.")
         else:
-            st.write("No ATM candidates found with valid EV values.")
+            st.write("No ATM candidates found within tolerance for EV calculation.")
+    elif position == "Call Spread":
+        # Placeholder: EV analysis for Call Spread can be implemented here.
+        st.subheader("Call Spread EV Analysis")
+        st.write("EV analysis for Call Spreads is not implemented yet.")
+    elif position == "Strangle":
+        # Placeholder: EV analysis for Strangle can be implemented here.
+        st.subheader("Strangle EV Analysis")
+        st.write("EV analysis for Strangles is not implemented yet.")
+    elif position == "Naked Calls":
+        # Placeholder: EV analysis for Naked Calls can be implemented here.
+        st.subheader("Naked Call EV Analysis")
+        st.write("EV analysis for Naked Calls is not implemented yet.")
+    elif position == "Limited OTM Puts":
+        # Placeholder: EV analysis for Limited OTM Puts can be implemented here.
+        st.subheader("Limited OTM Put EV Analysis")
+        st.write("EV analysis for Limited OTM Puts is not implemented yet.")
     else:
-        st.write("No ATM candidates found within tolerance for EV calculation.")
+        st.subheader("EV Analysis")
+        st.write("EV analysis for the selected position is not implemented yet.")
     
     if st.button("Simulate Trade"):
         st.write("Simulating trade based on recommendation...")
