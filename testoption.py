@@ -42,7 +42,6 @@ def params(instrument_name):
         "instrument_name": instrument_name,
     }
 
-# Column names returned by the Thalex API for mark price data
 COLUMNS = [
     "ts",
     "mark_price_open",
@@ -282,7 +281,7 @@ def compute_daily_average_iv(df_iv_agg):
 
 def compute_historical_vrp(daily_iv, daily_rv):
     n = min(len(daily_iv), len(daily_rv))
-    return [(iv ** 2) - (rv ** 2) for iv, rv in zip(daily_iv[:n], daily_rv[:n])]
+    return [(rv**2 - iv**2) for iv, rv in zip(daily_iv[:n], daily_rv[:n])]  # For long volatility, positive if RV > IV
 
 ###########################################
 # OPTION DELTA CALCULATION FUNCTION
@@ -364,7 +363,7 @@ def compute_gex(row, S, oi):
     gamma = compute_gamma(row, S)
     if gamma is None or np.isnan(gamma):
         return np.nan
-    # Standard GEX = Gamma * Spot^2 * OpenInterest (no arbitrary multiplier)
+    # Standard GEX = Gamma * Spot^2 * OpenInterest
     return gamma * oi * (S ** 2)
 
 ###########################################
@@ -429,7 +428,8 @@ def classify_vrp_regime(current_vrp, historical_vrps):
 # EV CALCULATION FUNCTIONS FOR DIFFERENT STRATEGIES
 ###########################################
 def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv):
-    # For ATM Straddle EV analysis using variance difference (expressed as a percentage)
+    # For ATM straddle EV using variance difference for long volatility trade:
+    # EV = ((RV^2 - IV^2) * T) / 2, then expressed as a percentage.
     tolerance = spot_price * 0.02  
     atm_candidates = [item for item in ticker_list if abs(item["strike"] - spot_price) <= tolerance]
     if not atm_candidates:
@@ -445,14 +445,13 @@ def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv):
     ev_candidates = []
     for strike, data in atm_strikes.items():
         avg_iv = data["iv_sum"] / data["count"]
-        # EV using variance difference formula: EV = ((IV² - RV²) * T)/2, then converted to percentage
-        ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
+        ev_value = (((rv**2 - avg_iv**2) * T) / 2) * 100
         ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
     return df_ev.sort_values("EV (%)", ascending=False)
 
 def calculate_limited_otm_put_ev(ticker_list, spot_price, T, rv):
-    # For Limited OTM Puts: consider put options with strike below spot.
+    # For Limited OTM Puts, use the same variance difference formula.
     tolerance = spot_price * 0.10  
     candidates = [item for item in ticker_list if item["option_type"] == "P" and item["strike"] < spot_price and (spot_price - item["strike"]) <= tolerance]
     if not candidates:
@@ -468,13 +467,13 @@ def calculate_limited_otm_put_ev(ticker_list, spot_price, T, rv):
     ev_candidates = []
     for strike, data in group.items():
         avg_iv = data["iv_sum"] / data["count"]
-        ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
+        ev_value = (((rv**2 - avg_iv**2) * T) / 2) * 100
         ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
     return df_ev.sort_values("EV (%)", ascending=False)
 
 def calculate_call_spread_ev(ticker_list, spot_price, T, rv):
-    # For Call Spreads: consider call options with strike above spot.
+    # For Call Spreads, use variance difference
     tolerance = spot_price * 0.10  
     candidates = [item for item in ticker_list if item["option_type"] == "C" and item["strike"] > spot_price and (item["strike"] - spot_price) <= tolerance]
     if not candidates:
@@ -490,13 +489,13 @@ def calculate_call_spread_ev(ticker_list, spot_price, T, rv):
     ev_candidates = []
     for strike, data in group.items():
         avg_iv = data["iv_sum"] / data["count"]
-        ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
+        ev_value = (((rv**2 - avg_iv**2) * T) / 2) * 100
         ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
     return df_ev.sort_values("EV (%)", ascending=False)
 
 def calculate_strangle_ev(ticker_list, spot_price, T, rv):
-    # For Strangles: include OTM calls and puts.
+    # For Strangles, include both OTM calls and puts using variance difference
     tolerance = spot_price * 0.10  
     candidates = [item for item in ticker_list if ((item["option_type"] == "C" and item["strike"] > spot_price and (item["strike"] - spot_price) <= tolerance)
                                                      or (item["option_type"] == "P" and item["strike"] < spot_price and (spot_price - item["strike"]) <= tolerance))]
@@ -513,13 +512,13 @@ def calculate_strangle_ev(ticker_list, spot_price, T, rv):
     ev_candidates = []
     for strike, data in group.items():
         avg_iv = data["iv_sum"] / data["count"]
-        ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
+        ev_value = (((rv**2 - avg_iv**2) * T) / 2) * 100
         ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
     return df_ev.sort_values("EV (%)", ascending=False)
 
 def calculate_naked_call_ev(ticker_list, spot_price, T, rv):
-    # For Naked Calls: consider all call options with strike above spot.
+    # For Naked Calls, use variance difference formula
     candidates = [item for item in ticker_list if item["option_type"] == "C" and item["strike"] > spot_price]
     if not candidates:
         return None
@@ -534,12 +533,13 @@ def calculate_naked_call_ev(ticker_list, spot_price, T, rv):
     ev_candidates = []
     for strike, data in group.items():
         avg_iv = data["iv_sum"] / data["count"]
-        ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
+        ev_value = (((rv**2 - avg_iv**2) * T) / 2) * 100
         ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
     return df_ev.sort_values("EV (%)", ascending=False)
 
 def calculate_small_atm_straddle_ev(ticker_list, spot_price, T, rv):
+    # Reuse ATM straddle EV function
     return calculate_atm_straddle_ev(ticker_list, spot_price, T, rv)
 
 ###########################################
@@ -606,7 +606,7 @@ def build_ticker_list(all_instruments, spot, T, smile_df):
         raw_iv = ticker_data.get("iv", None)
         if raw_iv is None:
             continue
-        # Adjust IV using the observed volatility smile
+        # Adjust IV using the observed volatility smile data
         adjusted_iv = adjust_volatility_with_smile(strike, smile_df)
         try:
             d1 = (np.log(spot / strike) + 0.5 * adjusted_iv**2 * T) / (adjusted_iv * np.sqrt(T))
@@ -631,6 +631,7 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
     rv_vol_series = calculate_parkinson_volatility(df_kraken, window_days=7)
     rv_vol = rv_vol_series.iloc[-1] if not rv_vol_series.empty else np.nan
     iv_vol = df["iv_close"].mean() if not df.empty else np.nan
+
     rv_var = rv_vol ** 2 if not pd.isna(rv_vol) else np.nan
     iv_var = iv_vol ** 2 if not pd.isna(iv_vol) else np.nan
     current_vrp = iv_var - rv_var if (not pd.isna(iv_vol) and not pd.isna(rv_vol)) else np.nan
@@ -639,7 +640,7 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
     if not np.isnan(divergence) and divergence > 0.20:
         st.write(f"Alert: IV and RV diverge by {divergence*100:.2f}% (threshold: 20%).")
 
-    # Compute rolling 1-day IV mean and std to determine market regime
+    # Determine market regime using rolling IV statistics
     df_iv_agg = df.groupby("date_time")["iv_close"].mean().to_frame(name="iv_mean")
     df_iv_agg.index = pd.to_datetime(df_iv_agg.index)
     df_iv_agg = df_iv_agg.resample("5min").mean().ffill().sort_index()
@@ -735,7 +736,7 @@ def main():
     if st.button("Logout"):
         st.session_state.logged_in = False
         st.stop()
-
+    
     current_date = dt.datetime.now()
     valid_days = get_valid_expiration_options(current_date)
     selected_day = st.sidebar.selectbox("Choose Expiration Day", options=valid_days)
@@ -747,7 +748,7 @@ def main():
     days_to_expiry = (expiry_date - current_date).days
     T_YEARS = days_to_expiry / 365
     st.sidebar.markdown(f"**Using Expiration Date:** {expiry_str}")
-
+    
     deviation_option = st.sidebar.select_slider(
         "Choose Deviation Range",
         options=["1 Standard Deviation (68.2%)", "2 Standard Deviations (95.4%)"],
@@ -762,7 +763,7 @@ def main():
         return
     spot_price = df_kraken["close"].iloc[-1]
     st.write(f"Current BTC/USD Price: {spot_price:.2f}")
-
+    
     try:
         filtered_calls, filtered_puts = get_filtered_instruments(spot_price, expiry_str, T_YEARS, multiplier)
     except Exception as e:
@@ -771,21 +772,20 @@ def main():
     st.write("Filtered Call Instruments:", filtered_calls)
     st.write("Filtered Put Instruments:", filtered_puts)
     all_instruments = filtered_calls + filtered_puts
-
+    
     df = fetch_data(tuple(all_instruments))
     if df.empty:
         st.error("No data fetched from Thalex. Please check the API or instrument names.")
         return
-
+    
     df_calls = df[df["option_type"] == "C"].copy().sort_values("date_time")
     df_puts = df[df["option_type"] == "P"].copy().sort_values("date_time")
-
+    
     df_iv_agg = (df.groupby("date_time", as_index=False)["iv_close"]
                  .mean().rename(columns={"iv_close": "iv_mean"}))
     df_iv_agg["date_time"] = pd.to_datetime(df_iv_agg["date_time"])
     df_iv_agg = df_iv_agg.set_index("date_time")
     df_iv_agg = df_iv_agg.resample("5min").mean().ffill().sort_index()
-    # Compute rolling IV statistics for market regime determination
     df_iv_agg["iv_rolling_mean"] = df_iv_agg["iv_mean"].rolling("1D").mean()
     df_iv_agg["iv_rolling_std"] = df_iv_agg["iv_mean"].rolling("1D").std()
     df_iv_agg["upper_zone"] = df_iv_agg["iv_rolling_mean"] + df_iv_agg["iv_rolling_std"]
@@ -849,7 +849,7 @@ def main():
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
 
-    # EV Analysis: Use the appropriate EV function based on recommended position.
+    # EV Analysis: Use the appropriate EV function based on the recommended position.
     rv_series = calculate_parkinson_volatility(df_kraken, window_days=7, annualize_days=365)
     rv_scalar = rv_series.iloc[-1] if not rv_series.empty else np.nan
     position = trade_decision['position']
