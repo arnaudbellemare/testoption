@@ -652,7 +652,7 @@ def main():
     st.write("Filtered Call Instruments:", filtered_calls)
     st.write("Filtered Put Instruments:", filtered_puts)
     all_instruments = filtered_calls + filtered_puts
-
+    
     df = fetch_data(tuple(all_instruments))
     if df.empty:
         st.error("No data fetched from Thalex. Please check the API or instrument names.")
@@ -740,8 +740,7 @@ def main():
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
     
-    # EV Analysis: Perform EV analysis based on the suggested position.
-    # We can extend this logic to support EV analysis for every possible position.
+    # EV Analysis: Based on the suggested position, perform the appropriate EV analysis.
     position = trade_decision['position']
     if position in ["ATM Straddle", "Leveraged Long Straddle"]:
         # For straddles, use ATM straddle EV analysis.
@@ -762,19 +761,15 @@ def main():
         else:
             st.write("No ATM candidates found within tolerance for EV calculation.")
     elif position == "Call Spread":
-        # Placeholder: EV analysis for Call Spread can be implemented here.
         st.subheader("Call Spread EV Analysis")
         st.write("EV analysis for Call Spreads is not implemented yet.")
     elif position == "Strangle":
-        # Placeholder: EV analysis for Strangle can be implemented here.
         st.subheader("Strangle EV Analysis")
         st.write("EV analysis for Strangles is not implemented yet.")
     elif position == "Naked Calls":
-        # Placeholder: EV analysis for Naked Calls can be implemented here.
         st.subheader("Naked Call EV Analysis")
         st.write("EV analysis for Naked Calls is not implemented yet.")
     elif position == "Limited OTM Puts":
-        # Placeholder: EV analysis for Limited OTM Puts can be implemented here.
         st.subheader("Limited OTM Put EV Analysis")
         st.write("EV analysis for Limited OTM Puts is not implemented yet.")
     else:
